@@ -131,6 +131,8 @@ pub struct SystemState {
     #[serde(default)]
     pub calendar_agenda: Option<CalendarAgenda>,
     pub timers: Vec<TimerState>,
+    #[serde(default)]
+    pub notifications: NotificationState,
     pub source_health: BTreeMap<SourceId, SourceHealth>,
 }
 
@@ -148,6 +150,50 @@ pub enum SystemUpdate {
     Calendar(Option<CalendarEvent>),
     CalendarAgenda(Option<CalendarAgenda>),
     Timers(Vec<TimerState>),
+    Notifications(NotificationState),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationUrgency {
+    Low,
+    #[default]
+    Normal,
+    Critical,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationAction {
+    pub key: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Notification {
+    pub id: u32,
+    pub app_name: String,
+    pub app_icon: Option<String>,
+    pub summary: String,
+    pub body: String,
+    pub actions: Vec<NotificationAction>,
+    pub urgency: NotificationUrgency,
+    pub image_path: Option<PathBuf>,
+    pub desktop_entry: Option<String>,
+    pub progress: Option<u8>,
+    pub received_at: i64,
+    pub expires_at: Option<i64>,
+    pub transient: bool,
+    pub resident: bool,
+    pub actionable: bool,
+    pub duplicate_count: u16,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationState {
+    pub items: Vec<Notification>,
+    pub visible_ids: Vec<u32>,
+    pub unread_count: u16,
+    pub dnd: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -315,10 +361,11 @@ pub enum DesktopContext {
     Audio,
     Power,
     Clock,
+    Notifications,
 }
 
 impl DesktopContext {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Overview,
         Self::Keyboard,
         Self::Resources,
@@ -327,6 +374,7 @@ impl DesktopContext {
         Self::Audio,
         Self::Power,
         Self::Clock,
+        Self::Notifications,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -339,6 +387,7 @@ impl DesktopContext {
             Self::Audio => "audio",
             Self::Power => "power",
             Self::Clock => "clock",
+            Self::Notifications => "notifications",
         }
     }
 }
@@ -548,6 +597,7 @@ pub enum SourceId {
     Calendar,
     CalendarAgenda,
     Timers,
+    Notifications,
     Activity,
     #[default]
     Clock,

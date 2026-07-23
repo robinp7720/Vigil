@@ -22,6 +22,9 @@ pub struct AppConfig {
     pub freshness: FreshnessConfig,
     pub retry_backoff: RetryBackoffConfig,
     pub command_activity: CommandActivityConfig,
+    pub experience: ExperienceConfig,
+    pub routines: RoutineConfig,
+    pub notifications: NotificationConfig,
 }
 
 impl Default for AppConfig {
@@ -34,6 +37,9 @@ impl Default for AppConfig {
             freshness: FreshnessConfig::default(),
             retry_backoff: RetryBackoffConfig::default(),
             command_activity: CommandActivityConfig::default(),
+            experience: ExperienceConfig::default(),
+            routines: RoutineConfig::default(),
+            notifications: NotificationConfig::default(),
         }
     }
 }
@@ -134,8 +140,40 @@ impl AppConfig {
             "retry_backoff.activity_seconds",
             self.retry_backoff.activity_seconds,
         )?;
+        validate_positive(
+            "routines.minimum_repetitions",
+            u64::from(self.routines.minimum_repetitions),
+        )?;
+        validate_positive(
+            "routines.retention_days",
+            u64::from(self.routines.retention_days),
+        )?;
+        validate_positive(
+            "notifications.history_days",
+            u64::from(self.notifications.history_days),
+        )?;
+        validate_positive(
+            "notifications.history_limit",
+            u64::from(self.notifications.history_limit),
+        )?;
+        validate_positive(
+            "notifications.visible_limit",
+            u64::from(self.notifications.visible_limit),
+        )?;
+        validate_positive(
+            "notifications.dnd_queue_limit",
+            u64::from(self.notifications.dnd_queue_limit),
+        )?;
+        validate_positive(
+            "notifications.preview_seconds",
+            self.notifications.preview_seconds,
+        )?;
 
         Ok(())
+    }
+
+    pub fn motion_style(&self) -> MotionStyle {
+        self.experience.motion
     }
 }
 
@@ -162,6 +200,9 @@ pub fn reload_runtime_config(current: &AppConfig, next: AppConfig) -> RuntimeCon
     }
     if current.command_activity != next.command_activity {
         reasons.push("command_activity changes require restart".to_string());
+    }
+    if current.notifications != next.notifications {
+        reasons.push("notification changes require restart".to_string());
     }
 
     if reasons.is_empty() {
@@ -222,6 +263,7 @@ impl Default for ModuleConfig {
                 ModuleName::Bluetooth,
                 ModuleName::BluetoothAudio,
                 ModuleName::Power,
+                ModuleName::Notifications,
                 ModuleName::Clock,
             ],
             reduced: vec![
@@ -248,7 +290,102 @@ pub enum ModuleName {
     BluetoothAudio,
     Power,
     Clock,
+    Notifications,
     CriticalWarning,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NotificationConfig {
+    pub enabled: bool,
+    pub history_days: u16,
+    pub history_limit: u16,
+    pub visible_limit: u8,
+    pub dnd_queue_limit: u8,
+    pub preview_seconds: u64,
+    pub low_timeout_seconds: u64,
+    pub normal_timeout_seconds: u64,
+    pub sound: bool,
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            history_days: 7,
+            history_limit: 100,
+            visible_limit: 3,
+            dnd_queue_limit: 20,
+            preview_seconds: 8,
+            low_timeout_seconds: 10,
+            normal_timeout_seconds: 30,
+            sound: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExperienceConfig {
+    pub motion: MotionStyle,
+    pub ambient_motion: AmbientMotion,
+    pub suggestions: bool,
+}
+
+impl Default for ExperienceConfig {
+    fn default() -> Self {
+        Self {
+            motion: MotionStyle::Bold,
+            ambient_motion: AmbientMotion::Meaningful,
+            suggestions: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MotionStyle {
+    Calm,
+    #[default]
+    Bold,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AmbientMotion {
+    Off,
+    #[default]
+    Meaningful,
+    Always,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RoutineConfig {
+    pub enabled: bool,
+    pub context: RoutineContextDetail,
+    pub minimum_repetitions: u8,
+    pub retention_days: u16,
+}
+
+impl Default for RoutineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            context: RoutineContextDetail::Rich,
+            minimum_repetitions: 3,
+            retention_days: 30,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutineContextDetail {
+    TimingOnly,
+    MetadataMinimized,
+    #[default]
+    Rich,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,7 +507,10 @@ fn validate_positive(path: &str, value: u64) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppConfig, ModuleName, ReloadStatus, reload_runtime_config};
+    use super::{
+        AmbientMotion, AppConfig, ModuleName, MotionStyle, ReloadStatus, RoutineContextDetail,
+        reload_runtime_config,
+    };
 
     #[test]
     fn defaults_match_the_approved_urgency_policy() {
@@ -381,6 +521,13 @@ mod tests {
         assert_eq!(config.thresholds.battery_low_percent, 15);
         assert_eq!(config.thresholds.battery_critical_percent, 7);
         assert_eq!(config.thresholds.critical_snooze_seconds, 300);
+        assert_eq!(config.experience.motion, MotionStyle::Bold);
+        assert_eq!(config.experience.ambient_motion, AmbientMotion::Meaningful);
+        assert!(config.experience.suggestions);
+        assert!(config.routines.enabled);
+        assert_eq!(config.routines.context, RoutineContextDetail::Rich);
+        assert_eq!(config.routines.minimum_repetitions, 3);
+        assert_eq!(config.routines.retention_days, 30);
     }
 
     #[test]
@@ -391,6 +538,8 @@ mod tests {
         assert_eq!(config.thresholds.critical_snooze_seconds, 300);
         assert_eq!(config.modules.reduced[0], ModuleName::Workspaces);
         assert_eq!(config.command_activity.allowlist.len(), 7);
+        assert_eq!(config.experience.motion, MotionStyle::Bold);
+        assert_eq!(config.routines.context, RoutineContextDetail::Rich);
     }
 
     #[test]
@@ -419,6 +568,8 @@ mod tests {
         next.primary_output = Some("DP-4".to_string());
         next.thresholds.battery_low_percent = 12;
         next.modules.reduced = vec![ModuleName::Workspaces, ModuleName::Clock];
+        next.experience.motion = MotionStyle::Calm;
+        next.routines.retention_days = 14;
 
         let reloaded = reload_runtime_config(&current, next.clone());
 

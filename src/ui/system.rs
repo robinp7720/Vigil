@@ -13,6 +13,7 @@ pub enum SystemModuleId {
     Bluetooth,
     Audio,
     Power,
+    Notifications,
     Clock,
 }
 
@@ -25,6 +26,7 @@ impl SystemModuleId {
             Self::Bluetooth => "bluetooth",
             Self::Audio => "audio",
             Self::Power => "power",
+            Self::Notifications => "notifications",
             Self::Clock => "clock",
         }
     }
@@ -37,6 +39,7 @@ impl SystemModuleId {
             ModuleName::Bluetooth => Some(Self::Bluetooth),
             ModuleName::BluetoothAudio => Some(Self::Audio),
             ModuleName::Power => Some(Self::Power),
+            ModuleName::Notifications => Some(Self::Notifications),
             ModuleName::Clock => Some(Self::Clock),
             ModuleName::Workspaces
             | ModuleName::FocusedApp
@@ -119,6 +122,7 @@ fn build_button_spec(
         SystemModuleId::Bluetooth => bluetooth_button(snapshot),
         SystemModuleId::Audio => audio_button(snapshot),
         SystemModuleId::Power => power_button(snapshot, config),
+        SystemModuleId::Notifications => notification_button(snapshot),
         SystemModuleId::Clock => clock_button(snapshot),
     }
 }
@@ -313,6 +317,34 @@ fn clock_button(snapshot: &BarSnapshot) -> SystemButtonSpec {
         icon_name: "preferences-system-time-symbolic".to_string(),
         label: Some(snapshot.system.clock.label.clone()),
         tooltip: with_health_note(format!("Clock: {}", snapshot.system.clock.label), health),
+        classes,
+    }
+}
+
+fn notification_button(snapshot: &BarSnapshot) -> SystemButtonSpec {
+    let state = &snapshot.system.notifications;
+    let mut classes = base_classes(SystemModuleId::Notifications);
+    if state.unread_count > 0 {
+        classes.push("has-unread".to_string());
+    }
+    if state.dnd {
+        classes.push("is-dnd".to_string());
+    }
+    SystemButtonSpec {
+        id: SystemModuleId::Notifications,
+        icon_name: if state.dnd {
+            "notifications-disabled-symbolic".to_string()
+        } else if state.unread_count > 0 {
+            "preferences-system-notifications-symbolic".to_string()
+        } else {
+            "notifications-symbolic".to_string()
+        },
+        label: (state.unread_count > 0).then(|| state.unread_count.to_string()),
+        tooltip: if state.dnd {
+            format!("Do Not Disturb · {} unread", state.unread_count)
+        } else {
+            format!("Notifications · {} unread", state.unread_count)
+        },
         classes,
     }
 }

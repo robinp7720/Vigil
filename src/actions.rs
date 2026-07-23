@@ -298,6 +298,7 @@ impl ActionBackend for SystemActionBackend {
             ControlResponse::Accepted
             | ControlResponse::Timers { .. }
             | ControlResponse::Contexts { .. }
+            | ControlResponse::Notifications { .. }
             | ControlResponse::ActionResult { success: true, .. } => Ok(()),
             ControlResponse::ActionResult {
                 success: false,

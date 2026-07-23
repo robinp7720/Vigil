@@ -207,6 +207,14 @@ impl StateStore {
                     true
                 }
             }
+            SystemUpdate::Notifications(value) => {
+                if self.snapshot.system.notifications == value {
+                    false
+                } else {
+                    self.snapshot.system.notifications = value;
+                    true
+                }
+            }
         }
     }
 
@@ -519,6 +527,7 @@ fn source_for_update(update: &StateUpdate) -> SourceId {
             SystemUpdate::Calendar(_) => SourceId::Calendar,
             SystemUpdate::CalendarAgenda(_) => SourceId::CalendarAgenda,
             SystemUpdate::Timers(_) => SourceId::Timers,
+            SystemUpdate::Notifications(_) => SourceId::Notifications,
         },
         StateUpdate::Activity(_) => SourceId::Activity,
         StateUpdate::Health { source, .. } => *source,
@@ -535,6 +544,7 @@ fn freshness_seconds(freshness: &FreshnessConfig, source: SourceId) -> Option<u6
         | SourceId::Bluetooth
         | SourceId::Audio
         | SourceId::Media
+        | SourceId::Notifications
         | SourceId::Activity => None,
         SourceId::Power => Some(freshness.power_seconds),
         SourceId::Resources => Some(freshness.resources_seconds),

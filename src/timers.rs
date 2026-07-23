@@ -138,7 +138,12 @@ impl TimerStore {
             | ControlRequest::ActivityFinish { .. }
             | ControlRequest::ContextGet { .. }
             | ControlRequest::ContextExecute { .. }
-            | ControlRequest::ControlCenterOpen { .. } => {
+            | ControlRequest::ControlCenterOpen { .. }
+            | ControlRequest::NotificationsGet
+            | ControlRequest::NotificationInvoke { .. }
+            | ControlRequest::NotificationDismiss { .. }
+            | ControlRequest::NotificationsClear
+            | ControlRequest::NotificationsSetDnd { .. } => {
                 bail!("timer store cannot apply non-timer control requests");
             }
         }

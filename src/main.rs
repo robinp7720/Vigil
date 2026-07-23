@@ -31,6 +31,15 @@ enum Command {
         #[arg(long, default_value_t = 1)]
         requests: usize,
     },
+    #[command(name = "__preview", hide = true)]
+    Preview {
+        #[arg(
+            long,
+            default_value = "idle",
+            value_parser = ["idle", "escalation", "suggestion", "routine", "control-center", "reduced-motion"]
+        )]
+        scenario: String,
+    },
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -105,6 +114,7 @@ fn run_cli(cli: Cli) -> Result<()> {
         }
         Some(Command::Activity { command }) => handle_activity_command(command, &cli.config),
         Some(Command::TestControlServer { requests }) => vigil::run_test_control_server(requests),
+        Some(Command::Preview { scenario }) => vigil::run_preview(&cli.config, &scenario),
     }
 }
 

@@ -29,6 +29,7 @@ pub fn context_snapshot(snapshot: &BarSnapshot, context: DesktopContext) -> Cont
         DesktopContext::Audio => audio_snapshot(snapshot),
         DesktopContext::Power => power_snapshot(snapshot),
         DesktopContext::Clock => clock_snapshot(snapshot),
+        DesktopContext::Notifications => notifications_snapshot(snapshot),
     }
 }
 
@@ -576,6 +577,29 @@ fn clock_snapshot(snapshot: &BarSnapshot) -> ContextSnapshot {
         detail,
         source_health(snapshot, SourceId::Clock),
         actions,
+    )
+}
+
+fn notifications_snapshot(snapshot: &BarSnapshot) -> ContextSnapshot {
+    let state = &snapshot.system.notifications;
+    let summary = if state.unread_count == 0 {
+        "No unread notifications".to_string()
+    } else {
+        format!("{} unread", state.unread_count)
+    };
+    let detail = state
+        .items
+        .first()
+        .map(|item| format!("{}: {}", item.app_name, item.summary))
+        .unwrap_or_else(|| "Notification history is empty".to_string());
+    make_snapshot(
+        DesktopContext::Notifications,
+        "Notifications",
+        "preferences-system-notifications-symbolic",
+        summary,
+        detail,
+        source_health(snapshot, SourceId::Notifications),
+        Vec::new(),
     )
 }
 

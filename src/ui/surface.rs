@@ -12,16 +12,17 @@ use gtk4 as gtk;
 use gtk4_layer_shell::{Edge, Layer, LayerShell};
 
 use crate::{
-    ActionCompletion, ActionIntent, ActionRequest, AppConfig, BarSnapshot, CalendarMonthRequest,
-    ContextCard, ContextTier, DesktopContext, Direction, Dismissals, MediaControlAction,
-    OutputRole, WorkspaceState, select_context,
+    ActionCompletion, ActionIntent, ActionRequest, AmbientMotion, AppConfig, BarSnapshot,
+    CalendarMonthRequest, ContextCard, ContextTier, DesktopContext, Direction, Dismissals,
+    MediaControlAction, MotionStyle, Notification, NotificationControl, OutputRole, Suggestion,
+    SuggestionAction, SuggestionEngine, SuggestionSource, WorkspaceState, select_context,
 };
 
 use super::context_card::{
     ContextAction, context_action, context_presentation, context_tier, media_playback_icon,
     warning_text,
 };
-use super::control_center::{ControlCenterFocus, ControlCenterView};
+use super::control_center::{ControlCenterFocus, ControlCenterView, notification_row};
 use super::popovers::PopoverCoordinator;
 use super::system::{SystemButtonSpec, SystemCluster, SystemModuleId, build_system_cluster};
 use super::wm::{WindowGroupSpec, select_primary_output, title_for_output, window_groups};
@@ -41,8 +42,13 @@ pub struct SurfaceSpec {
     pub title: TitleSpec,
     pub context: Option<ContextSpec>,
     pub warning: Option<WarningSpec>,
+    pub suggestion: Option<Suggestion>,
+    pub control_suggestions: Vec<Suggestion>,
+    pub notification: Option<Notification>,
     pub system: Option<SystemCluster>,
     pub clock_label: String,
+    pub motion_style: MotionStyle,
+    pub ambient_motion: AmbientMotion,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +90,8 @@ pub struct RenderPlan {
     pub warning: bool,
     pub system: bool,
     pub clock: bool,
+    pub suggestions: bool,
+    pub motion: bool,
 }
 
 impl RenderPlan {
@@ -96,14 +104,21 @@ impl RenderPlan {
                 warning: true,
                 system: true,
                 clock: true,
+                suggestions: true,
+                motion: true,
             },
             Some(previous) => Self {
                 workspaces: previous.workspaces != next.workspaces,
                 title: previous.title != next.title,
-                context: previous.context != next.context,
+                context: previous.context != next.context
+                    || previous.suggestion != next.suggestion
+                    || previous.notification != next.notification,
                 warning: previous.warning != next.warning,
                 system: previous.system != next.system,
                 clock: previous.clock_label != next.clock_label,
+                suggestions: previous.control_suggestions != next.control_suggestions,
+                motion: previous.motion_style != next.motion_style
+                    || previous.ambient_motion != next.ambient_motion,
             },
         }
     }
@@ -113,6 +128,15 @@ pub fn surface_specs(
     snapshot: &BarSnapshot,
     config: &AppConfig,
     dismissals: &Dismissals,
+) -> Vec<SurfaceSpec> {
+    surface_specs_with_suggestions(snapshot, config, dismissals, &[])
+}
+
+fn surface_specs_with_suggestions(
+    snapshot: &BarSnapshot,
+    config: &AppConfig,
+    dismissals: &Dismissals,
+    suggestions: &[Suggestion],
 ) -> Vec<SurfaceSpec> {
     let Some(primary_output) = select_primary_output(snapshot, config) else {
         return Vec::new();
@@ -139,6 +163,17 @@ pub fn surface_specs(
             text: warning_text(card),
             tier: ContextTier::Critical,
         });
+    let primary_suggestion = bar_suggestion(selected_context.as_ref(), suggestions);
+    let primary_notification = snapshot
+        .system
+        .notifications
+        .items
+        .first()
+        .filter(|item| {
+            now_epoch.saturating_sub(item.received_at)
+                <= i64::try_from(config.notifications.preview_seconds).unwrap_or(i64::MAX)
+        })
+        .cloned();
 
     let mut specs = Vec::with_capacity(snapshot.outputs.len());
 
@@ -146,11 +181,18 @@ pub fn surface_specs(
         specs.push(spec_for_output(
             output,
             OutputRole::Primary,
-            Some(build_system_cluster(snapshot, config)),
-            snapshot.system.clock.label.clone(),
-            groups.clone(),
-            primary_context.clone(),
-            None,
+            SurfaceContent {
+                system: Some(build_system_cluster(snapshot, config)),
+                clock_label: snapshot.system.clock.label.clone(),
+                window_groups: groups.clone(),
+                context: primary_context.clone(),
+                warning: None,
+                suggestion: primary_suggestion,
+                control_suggestions: suggestions.to_vec(),
+                notification: primary_notification,
+                motion_style: config.motion_style(),
+                ambient_motion: config.experience.ambient_motion,
+            },
         ));
     }
 
@@ -162,25 +204,41 @@ pub fn surface_specs(
         specs.push(spec_for_output(
             output,
             OutputRole::Reduced,
-            None,
-            snapshot.system.clock.label.clone(),
-            groups.clone(),
-            None,
-            reduced_warning.clone(),
+            SurfaceContent {
+                system: None,
+                clock_label: snapshot.system.clock.label.clone(),
+                window_groups: groups.clone(),
+                context: None,
+                warning: reduced_warning.clone(),
+                suggestion: None,
+                control_suggestions: Vec::new(),
+                notification: None,
+                motion_style: config.motion_style(),
+                ambient_motion: config.experience.ambient_motion,
+            },
         ));
     }
 
     specs
 }
 
-fn spec_for_output(
-    output: &crate::OutputState,
-    role: OutputRole,
+struct SurfaceContent {
     system: Option<SystemCluster>,
     clock_label: String,
     window_groups: Vec<WindowGroupSpec>,
     context: Option<ContextSpec>,
     warning: Option<WarningSpec>,
+    suggestion: Option<Suggestion>,
+    control_suggestions: Vec<Suggestion>,
+    notification: Option<Notification>,
+    motion_style: MotionStyle,
+    ambient_motion: AmbientMotion,
+}
+
+fn spec_for_output(
+    output: &crate::OutputState,
+    role: OutputRole,
+    content: SurfaceContent,
 ) -> SurfaceSpec {
     SurfaceSpec {
         output_name: output.name.clone(),
@@ -198,13 +256,43 @@ fn spec_for_output(
                 .filter(|app| !app.trim().is_empty())
                 .unwrap_or_else(|| "Desktop".to_string()),
             text: title_for_output(output),
-            window_groups,
+            window_groups: content.window_groups,
         },
-        context,
-        warning,
-        system,
-        clock_label,
+        context: content.context,
+        warning: content.warning,
+        suggestion: content.suggestion,
+        control_suggestions: content.control_suggestions,
+        notification: content.notification,
+        system: content.system,
+        clock_label: content.clock_label,
+        motion_style: content.motion_style,
+        ambient_motion: content.ambient_motion,
     }
+}
+
+fn bar_suggestion(
+    selected_context: Option<&ContextCard>,
+    suggestions: &[Suggestion],
+) -> Option<Suggestion> {
+    let Some(context) = selected_context else {
+        return suggestions.first().cloned();
+    };
+    let tier = context_tier(context);
+    if tier == ContextTier::Ambient {
+        return suggestions.first().cloned();
+    }
+
+    let related_context = match context_action(context) {
+        Some(ContextAction::OpenControlCenter(context)) => Some(context),
+        _ => None,
+    };
+    suggestions
+        .iter()
+        .find(|suggestion| {
+            suggestion.source == SuggestionSource::Live
+                && Some(suggestion.context) == related_context
+        })
+        .cloned()
 }
 
 fn workspace_button_spec(workspace: &WorkspaceState) -> WorkspaceButtonSpec {
@@ -245,11 +333,19 @@ impl ManagedOverlay {
 
 type PopoverRegistry = Rc<RefCell<BTreeMap<String, ManagedOverlay>>>;
 
+struct ToastHandle {
+    window: gtk::ApplicationWindow,
+    notification: Notification,
+}
+
 pub struct SurfaceRegistry {
     surfaces: BTreeMap<String, SurfaceHandle>,
+    toasts: BTreeMap<u32, ToastHandle>,
     calendar_sender: Option<Sender<CalendarMonthRequest>>,
     dismissals: Rc<RefCell<Dismissals>>,
     context_dirty: Rc<Cell<bool>>,
+    suggestions: Rc<RefCell<SuggestionEngine>>,
+    notification_control: Option<NotificationControl>,
 }
 
 impl Default for SurfaceRegistry {
@@ -262,23 +358,136 @@ impl SurfaceRegistry {
     pub fn new() -> Self {
         Self {
             surfaces: BTreeMap::new(),
+            toasts: BTreeMap::new(),
             calendar_sender: None,
             dismissals: Rc::new(RefCell::new(Dismissals::default())),
             context_dirty: Rc::new(Cell::new(false)),
+            suggestions: Rc::new(RefCell::new(SuggestionEngine::default())),
+            notification_control: None,
         }
     }
 
     pub fn with_calendar_sender(sender: Sender<CalendarMonthRequest>) -> Self {
+        Self::with_suggestion_engine(Some(sender), SuggestionEngine::default())
+    }
+
+    pub fn with_suggestion_engine(
+        calendar_sender: Option<Sender<CalendarMonthRequest>>,
+        suggestions: SuggestionEngine,
+    ) -> Self {
+        Self::with_services(calendar_sender, suggestions, None)
+    }
+
+    pub fn with_services(
+        calendar_sender: Option<Sender<CalendarMonthRequest>>,
+        suggestions: SuggestionEngine,
+        notification_control: Option<NotificationControl>,
+    ) -> Self {
         Self {
             surfaces: BTreeMap::new(),
-            calendar_sender: Some(sender),
+            toasts: BTreeMap::new(),
+            calendar_sender,
             dismissals: Rc::new(RefCell::new(Dismissals::default())),
             context_dirty: Rc::new(Cell::new(false)),
+            suggestions: Rc::new(RefCell::new(suggestions)),
+            notification_control,
         }
     }
 
     pub fn take_context_dirty(&self) -> bool {
         self.context_dirty.replace(false)
+    }
+
+    fn reconcile_toasts(
+        &mut self,
+        application: &gtk::Application,
+        snapshot: &BarSnapshot,
+        monitors: &BTreeMap<String, gdk::Monitor>,
+    ) {
+        let visible = snapshot
+            .system
+            .notifications
+            .visible_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let stale = self
+            .toasts
+            .keys()
+            .filter(|id| !visible.contains(id))
+            .copied()
+            .collect::<Vec<_>>();
+        for id in stale {
+            if let Some(toast) = self.toasts.remove(&id) {
+                toast.window.close();
+            }
+        }
+        let focused_output = snapshot
+            .focused_output
+            .as_deref()
+            .filter(|output| monitors.contains_key(*output))
+            .or_else(|| monitors.keys().next().map(String::as_str));
+        let Some(focused_output) = focused_output else {
+            return;
+        };
+
+        for (index, id) in snapshot.system.notifications.visible_ids.iter().enumerate() {
+            let Some(notification) = snapshot
+                .system
+                .notifications
+                .items
+                .iter()
+                .find(|item| item.id == *id)
+                .cloned()
+            else {
+                continue;
+            };
+            if let Some(toast) = self.toasts.get_mut(id) {
+                toast.window.set_margin(Edge::Top, toast_margin(index));
+                if toast.notification != notification {
+                    toast.window.set_child(Some(&notification_row(
+                        &notification,
+                        self.notification_control.as_ref(),
+                        true,
+                    )));
+                    toast.notification = notification;
+                }
+                continue;
+            }
+            let Some(monitor) = monitors.get(focused_output) else {
+                continue;
+            };
+            let window = gtk::ApplicationWindow::builder()
+                .application(application)
+                .title("Vigil Notification")
+                .build();
+            window.set_decorated(false);
+            window.set_resizable(false);
+            window.set_default_size(420, -1);
+            window.add_css_class("notification-window");
+            window.init_layer_shell();
+            window.set_namespace(Some("vigil-notifications"));
+            window.set_layer(Layer::Overlay);
+            window.set_anchor(Edge::Top, true);
+            window.set_anchor(Edge::Right, true);
+            window.set_margin(Edge::Top, toast_margin(index));
+            window.set_margin(Edge::Right, 12);
+            window.set_exclusive_zone(0);
+            window.set_monitor(Some(monitor));
+            window.set_child(Some(&notification_row(
+                &notification,
+                self.notification_control.as_ref(),
+                true,
+            )));
+            window.present();
+            self.toasts.insert(
+                *id,
+                ToastHandle {
+                    window,
+                    notification,
+                },
+            );
+        }
     }
 
     pub fn reconcile(
@@ -288,12 +497,23 @@ impl SurfaceRegistry {
         config: &AppConfig,
         action_sender: &Sender<ActionRequest>,
     ) {
-        let desired_specs = surface_specs(snapshot, config, &self.dismissals.borrow());
+        let suggestions = self.suggestions.borrow_mut().suggestions(
+            snapshot,
+            config,
+            snapshot.system.clock.epoch_seconds,
+        );
+        let desired_specs = surface_specs_with_suggestions(
+            snapshot,
+            config,
+            &self.dismissals.borrow(),
+            &suggestions,
+        );
         let Some(display) = gdk::Display::default() else {
             return;
         };
 
         let monitors = monitors_by_connector(&display);
+        self.reconcile_toasts(application, snapshot, &monitors);
         let desired_connectors = desired_specs
             .iter()
             .filter(|spec| monitors.contains_key(&spec.output_name))
@@ -333,10 +553,14 @@ impl SurfaceRegistry {
                         application,
                         monitor,
                         &spec,
-                        action_sender.clone(),
-                        self.calendar_sender.clone(),
-                        self.dismissals.clone(),
-                        self.context_dirty.clone(),
+                        SurfaceRuntime {
+                            action_sender: action_sender.clone(),
+                            calendar_sender: self.calendar_sender.clone(),
+                            dismissals: self.dismissals.clone(),
+                            context_dirty: self.context_dirty.clone(),
+                            suggestions: self.suggestions.clone(),
+                            notification_control: self.notification_control.clone(),
+                        },
                     );
                     self.surfaces.insert(spec.output_name.clone(), surface);
                 }
@@ -348,12 +572,31 @@ impl SurfaceRegistry {
         for (_, surface) in std::mem::take(&mut self.surfaces) {
             surface.close();
         }
+        for (_, toast) in std::mem::take(&mut self.toasts) {
+            toast.window.close();
+        }
     }
 
-    pub fn handle_completion(&mut self, completion: &ActionCompletion) -> bool {
-        self.surfaces
+    pub fn handle_completion(
+        &mut self,
+        completion: &ActionCompletion,
+        snapshot: &BarSnapshot,
+        config: &AppConfig,
+        now_epoch: i64,
+    ) -> bool {
+        let learned = matches!(completion.result, crate::ActionResult::Completed)
+            && self.suggestions.borrow_mut().record_success(
+                &completion.origin,
+                &completion.intent,
+                snapshot,
+                &config.routines,
+                now_epoch,
+            );
+        let handled = self
+            .surfaces
             .values_mut()
-            .any(|surface| surface.handle_completion(completion))
+            .any(|surface| surface.handle_completion(completion));
+        learned || handled
     }
 
     pub fn open_control_center(
@@ -378,6 +621,10 @@ impl SurfaceRegistry {
     }
 }
 
+fn toast_margin(index: usize) -> i32 {
+    SURFACE_MARGIN + BAR_HEIGHT + 10 + i32::try_from(index).unwrap_or(i32::MAX) * 190
+}
+
 fn monitors_by_connector(display: &gdk::Display) -> BTreeMap<String, gdk::Monitor> {
     display
         .monitors()
@@ -397,31 +644,31 @@ enum SurfaceHandle {
     Reduced(ReducedSurface),
 }
 
+struct SurfaceRuntime {
+    action_sender: Sender<ActionRequest>,
+    calendar_sender: Option<Sender<CalendarMonthRequest>>,
+    dismissals: Rc<RefCell<Dismissals>>,
+    context_dirty: Rc<Cell<bool>>,
+    suggestions: Rc<RefCell<SuggestionEngine>>,
+    notification_control: Option<NotificationControl>,
+}
+
 impl SurfaceHandle {
     fn new(
         application: &gtk::Application,
         monitor: &gdk::Monitor,
         spec: &SurfaceSpec,
-        action_sender: Sender<ActionRequest>,
-        calendar_sender: Option<Sender<CalendarMonthRequest>>,
-        dismissals: Rc<RefCell<Dismissals>>,
-        context_dirty: Rc<Cell<bool>>,
+        runtime: SurfaceRuntime,
     ) -> Self {
         match spec.role {
-            OutputRole::Primary => Self::Primary(PrimarySurface::new(
-                application,
-                monitor,
-                spec,
-                action_sender,
-                calendar_sender,
-                dismissals,
-                context_dirty,
-            )),
+            OutputRole::Primary => {
+                Self::Primary(PrimarySurface::new(application, monitor, spec, runtime))
+            }
             OutputRole::Reduced => Self::Reduced(ReducedSurface::new(
                 application,
                 monitor,
                 spec,
-                action_sender,
+                runtime.action_sender,
             )),
         }
     }
@@ -457,7 +704,7 @@ impl SurfaceHandle {
 
 pub struct PrimarySurface {
     window: gtk::ApplicationWindow,
-    workspaces: gtk::Box,
+    workspaces: WorkspaceStrip,
     app_label: gtk::Label,
     title_label: gtk::Label,
     title_groups: Rc<RefCell<Vec<WindowGroupSpec>>>,
@@ -468,6 +715,9 @@ pub struct PrimarySurface {
     context_media_controls: gtk::Box,
     context_media_play: gtk::Button,
     current_context: Rc<RefCell<Option<ContextSpec>>>,
+    suggestion_revealer: gtk::Revealer,
+    suggestion_action: gtk::Button,
+    current_suggestion: Rc<RefCell<Option<Suggestion>>>,
     system_items: gtk::Box,
     status_buttons: BTreeMap<SystemModuleId, StatusButtonView>,
     status_button_order: Vec<SystemModuleId>,
@@ -475,22 +725,31 @@ pub struct PrimarySurface {
     popover_coordinator: Rc<RefCell<PopoverCoordinator>>,
     popover_registry: PopoverRegistry,
     action_sender: Sender<ActionRequest>,
+    notification_control: Option<NotificationControl>,
     current_spec: Option<SurfaceSpec>,
 }
 
 impl PrimarySurface {
-    pub fn new(
+    fn new(
         application: &gtk::Application,
         monitor: &gdk::Monitor,
         spec: &SurfaceSpec,
-        action_sender: Sender<ActionRequest>,
-        calendar_sender: Option<Sender<CalendarMonthRequest>>,
-        dismissals: Rc<RefCell<Dismissals>>,
-        context_dirty: Rc<Cell<bool>>,
+        runtime: SurfaceRuntime,
     ) -> Self {
+        let SurfaceRuntime {
+            action_sender,
+            calendar_sender,
+            dismissals,
+            context_dirty,
+            suggestions,
+            notification_control,
+        } = runtime;
         let window = base_window(application, monitor);
         window.add_css_class("bar-window");
         window.add_css_class("primary-bar");
+        if monitor.geometry().width() < 1_600 {
+            window.add_css_class("compact-bar");
+        }
         let popover_coordinator = Rc::new(RefCell::new(PopoverCoordinator::default()));
         let popover_registry = Rc::new(RefCell::new(BTreeMap::new()));
 
@@ -514,10 +773,8 @@ impl PrimarySurface {
         center_slot.set_size_request(CENTER_SLOT_MIN_WIDTH, -1);
         right.set_halign(gtk::Align::End);
 
-        let workspaces = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-        workspaces.add_css_class("workspace-strip");
-        install_workspace_scroll(&workspaces, action_sender.clone(), spec.output_name.clone());
-        left.append(&workspaces);
+        let workspaces = WorkspaceStrip::new(action_sender.clone(), spec.output_name.clone());
+        left.append(workspaces.widget());
         let app_label = gtk::Label::new(None);
         app_label.add_css_class("app-label");
         app_label.set_max_width_chars(22);
@@ -589,7 +846,23 @@ impl PrimarySurface {
         context_media_controls.append(&context_media_play);
         context_media_controls.append(&context_media_next);
         context_row.append(&context_media_controls);
+        let suggestion_actions = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        suggestion_actions.add_css_class("suggestion-actions");
+        let suggestion_action = gtk::Button::new();
+        suggestion_action.add_css_class("suggestion-action");
+        suggestion_action.set_has_frame(false);
+        let suggestion_dismiss = icon_button("window-close-symbolic", "Dismiss this suggestion");
+        suggestion_dismiss.add_css_class("suggestion-dismiss");
+        suggestion_actions.append(&suggestion_action);
+        suggestion_actions.append(&suggestion_dismiss);
+        let suggestion_revealer = gtk::Revealer::new();
+        suggestion_revealer.set_transition_type(gtk::RevealerTransitionType::SlideLeft);
+        suggestion_revealer.set_transition_duration(240);
+        suggestion_revealer.set_child(Some(&suggestion_actions));
+        suggestion_revealer.set_reveal_child(false);
+        context_row.append(&suggestion_revealer);
         let current_context = Rc::new(RefCell::new(None::<ContextSpec>));
+        let current_suggestion = Rc::new(RefCell::new(None::<Suggestion>));
         context_stack.add_named(&title_button, Some("title"));
         context_stack.add_named(&context_row, Some("context"));
         context_stack.set_visible_child_name("title");
@@ -614,6 +887,9 @@ impl PrimarySurface {
             initial_system.control_center(),
             action_sender.clone(),
             calendar_sender,
+            suggestions.clone(),
+            context_dirty.clone(),
+            notification_control.clone(),
         ));
         register_control_window(
             "control-center",
@@ -624,14 +900,55 @@ impl PrimarySurface {
         install_context_interactions(
             &context_row,
             current_context.clone(),
+            current_suggestion.clone(),
             dismissals,
-            context_dirty,
+            context_dirty.clone(),
             action_sender.clone(),
             spec.output_name.clone(),
             control_center.clone(),
             popover_coordinator.clone(),
             popover_registry.clone(),
+            suggestions.clone(),
         );
+        {
+            let current_suggestion = current_suggestion.clone();
+            let action_sender = action_sender.clone();
+            let control_center = control_center.clone();
+            suggestion_action.connect_clicked(move |button| {
+                let Some(suggestion) = current_suggestion.borrow().clone() else {
+                    return;
+                };
+                match suggestion.action {
+                    SuggestionAction::Intent(intent) => {
+                        button.add_css_class("is-pending");
+                        let _ = action_sender.send(ActionRequest {
+                            origin: format!("suggestion-action|{}", suggestion.id),
+                            intent,
+                        });
+                    }
+                    SuggestionAction::OpenControlCenter(context) => {
+                        control_center.show_page(context.into());
+                        control_center.present();
+                    }
+                }
+            });
+        }
+        {
+            let current_suggestion = current_suggestion.clone();
+            let suggestions = suggestions.clone();
+            let context_dirty = context_dirty.clone();
+            suggestion_dismiss.connect_clicked(move |_| {
+                let Some(suggestion) = current_suggestion.borrow().clone() else {
+                    return;
+                };
+                if suggestions
+                    .borrow_mut()
+                    .dismiss(&suggestion.id, current_epoch_seconds())
+                {
+                    context_dirty.set(true);
+                }
+            });
+        }
         for (button, action) in [
             (&context_media_previous, MediaControlAction::Previous),
             (&context_media_play, MediaControlAction::PlayPause),
@@ -657,6 +974,7 @@ impl PrimarySurface {
                 control_center.clone(),
                 popover_coordinator.clone(),
                 popover_registry.clone(),
+                notification_control.clone(),
             );
             system_items.append(&status_button.button);
             status_buttons.insert(module.button.id, status_button);
@@ -678,6 +996,7 @@ impl PrimarySurface {
             popover_registry.clone(),
         );
         window.present();
+        flash_class(&root, "bar-entering", 620);
 
         let mut surface = Self {
             window,
@@ -692,6 +1011,9 @@ impl PrimarySurface {
             context_media_controls,
             context_media_play,
             current_context,
+            suggestion_revealer,
+            suggestion_action,
+            current_suggestion,
             system_items,
             status_buttons,
             status_button_order,
@@ -699,6 +1021,7 @@ impl PrimarySurface {
             popover_coordinator,
             popover_registry,
             action_sender,
+            notification_control,
             current_spec: None,
         };
         surface.render(spec);
@@ -712,12 +1035,7 @@ impl PrimarySurface {
         }
 
         if plan.workspaces {
-            render_workspaces(
-                &self.workspaces,
-                &self.action_sender,
-                &spec.output_name,
-                &spec.workspaces,
-            );
+            self.workspaces.render(&spec.workspaces);
         }
         if plan.title {
             self.app_label.set_label(&spec.title.app);
@@ -729,13 +1047,73 @@ impl PrimarySurface {
         {
             self.render_system_modules(system);
         }
+        if plan.suggestions {
+            self.control_center
+                .update_suggestions(&spec.control_suggestions);
+        }
+        if plan.motion {
+            apply_motion_style(&self.window, spec.motion_style, spec.ambient_motion);
+        }
 
         if plan.context {
-            *self.current_context.borrow_mut() = spec.context.clone();
-            if let Some(context) = spec.context.as_ref() {
+            let notification_visible = spec.notification.is_some()
+                && spec
+                    .context
+                    .as_ref()
+                    .is_none_or(|context| context.tier == ContextTier::Ambient);
+            *self.current_context.borrow_mut() = if notification_visible {
+                None
+            } else {
+                spec.context.clone()
+            };
+            *self.current_suggestion.borrow_mut() = if notification_visible {
+                None
+            } else {
+                spec.suggestion.clone()
+            };
+            self.suggestion_action.remove_css_class("is-pending");
+            self.suggestion_action.remove_css_class("is-success");
+            self.suggestion_action.remove_css_class("is-failure");
+            if let Some(suggestion) = spec.suggestion.as_ref() {
+                self.suggestion_action.set_label(&suggestion.action_label);
+                self.suggestion_action
+                    .set_tooltip_text(Some(&suggestion.reason));
+                self.suggestion_revealer.set_reveal_child(true);
+                self.context_row.add_css_class("proactive");
+            } else {
+                self.suggestion_action.set_label("");
+                self.suggestion_action.set_tooltip_text(None);
+                self.suggestion_revealer.set_reveal_child(false);
+                self.context_row.remove_css_class("proactive");
+            }
+
+            self.context_row.remove_css_class("notification-preview");
+            if let Some(notification) = spec.notification.as_ref().filter(|_| notification_visible)
+            {
+                self.context_icon
+                    .set_icon_name(Some("preferences-system-notifications-symbolic"));
+                let text = if notification.body.is_empty() {
+                    format!("{} · {}", notification.app_name, notification.summary)
+                } else {
+                    format!(
+                        "{} · {} — {}",
+                        notification.app_name,
+                        notification.summary,
+                        notification.body.replace('\n', " ")
+                    )
+                };
+                self.context_label.set_label(&text);
+                clear_tier_classes(&self.context_row);
+                clear_context_motion_classes(&self.context_row);
+                self.context_row.add_css_class("notification-preview");
+                self.context_stack.set_visible_child_name("context");
+                self.context_media_controls.set_visible(false);
+                self.suggestion_revealer.set_reveal_child(false);
+            } else if let Some(context) = spec.context.as_ref() {
                 self.context_icon.set_icon_name(Some(&context.icon_name));
                 self.context_label.set_label(&context.text);
                 apply_tier_classes(&self.context_row, context.tier);
+                apply_context_motion_classes(&self.context_row, &context.card);
                 self.context_stack.set_visible_child_name("context");
                 if let ContextCard::Media { status, .. } = &context.card {
                     self.context_media_play
@@ -744,10 +1122,19 @@ impl PrimarySurface {
                 } else {
                     self.context_media_controls.set_visible(false);
                 }
+            } else if let Some(suggestion) = spec.suggestion.as_ref() {
+                self.context_icon.set_icon_name(Some(&suggestion.icon_name));
+                self.context_label.set_label(&suggestion.title);
+                clear_tier_classes(&self.context_row);
+                clear_context_motion_classes(&self.context_row);
+                self.context_row.add_css_class("suggestion");
+                self.context_stack.set_visible_child_name("context");
+                self.context_media_controls.set_visible(false);
             } else {
                 self.context_icon.set_icon_name(None);
                 self.context_label.set_label("");
                 clear_tier_classes(&self.context_row);
+                clear_context_motion_classes(&self.context_row);
                 self.context_stack.set_visible_child_name("title");
                 self.context_media_controls.set_visible(false);
             }
@@ -757,7 +1144,26 @@ impl PrimarySurface {
     }
 
     pub fn handle_completion(&mut self, completion: &ActionCompletion) -> bool {
-        self.control_center.handle_completion(completion)
+        let suggestion_handled = if let Some(id) =
+            completion.origin.strip_prefix("suggestion-action|")
+            && self
+                .current_suggestion
+                .borrow()
+                .as_ref()
+                .is_some_and(|suggestion| suggestion.id == id)
+        {
+            self.suggestion_action.remove_css_class("is-pending");
+            let class_name = match completion.result {
+                crate::ActionResult::Completed => "is-success",
+                crate::ActionResult::Failed { .. } => "is-failure",
+            };
+            flash_class(&self.suggestion_action, class_name, 720);
+            true
+        } else {
+            false
+        };
+        let control_handled = self.control_center.handle_completion(completion);
+        suggestion_handled || control_handled
     }
 
     fn close(self) {
@@ -798,6 +1204,7 @@ impl PrimarySurface {
                 self.control_center.clone(),
                 self.popover_coordinator.clone(),
                 self.popover_registry.clone(),
+                self.notification_control.clone(),
             );
             self.system_items.append(&status_button.button);
             self.status_buttons.insert(module.button.id, status_button);
@@ -812,14 +1219,13 @@ impl PrimarySurface {
 
 pub struct ReducedSurface {
     window: gtk::ApplicationWindow,
-    workspaces: gtk::Box,
+    workspaces: WorkspaceStrip,
     app_label: gtk::Label,
     title_label: gtk::Label,
     title_groups: Rc<RefCell<Vec<WindowGroupSpec>>>,
     warning_label: gtk::Label,
     clock_label: gtk::Label,
     popover_registry: PopoverRegistry,
-    action_sender: Sender<ActionRequest>,
     current_spec: Option<SurfaceSpec>,
 }
 
@@ -833,6 +1239,9 @@ impl ReducedSurface {
         let window = base_window(application, monitor);
         window.add_css_class("bar-window");
         window.add_css_class("reduced-bar");
+        if monitor.geometry().width() < 1_600 {
+            window.add_css_class("compact-bar");
+        }
         let popover_coordinator = Rc::new(RefCell::new(PopoverCoordinator::default()));
         let popover_registry = Rc::new(RefCell::new(BTreeMap::new()));
 
@@ -853,10 +1262,8 @@ impl ReducedSurface {
         right.add_css_class("reduced-status-island");
         right.set_halign(gtk::Align::End);
 
-        let workspaces = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-        workspaces.add_css_class("workspace-strip");
-        install_workspace_scroll(&workspaces, action_sender.clone(), spec.output_name.clone());
-        left.append(&workspaces);
+        let workspaces = WorkspaceStrip::new(action_sender.clone(), spec.output_name.clone());
+        left.append(workspaces.widget());
         let app_label = gtk::Label::new(None);
         app_label.add_css_class("app-label");
         app_label.set_max_width_chars(18);
@@ -902,6 +1309,7 @@ impl ReducedSurface {
         window.set_child(Some(&root));
         install_escape_dismiss(&window, popover_coordinator, popover_registry.clone());
         window.present();
+        flash_class(&root, "bar-entering", 520);
 
         let mut surface = Self {
             window,
@@ -912,7 +1320,6 @@ impl ReducedSurface {
             warning_label,
             clock_label,
             popover_registry,
-            action_sender,
             current_spec: None,
         };
         surface.render(spec);
@@ -926,12 +1333,7 @@ impl ReducedSurface {
         }
 
         if plan.workspaces {
-            render_workspaces(
-                &self.workspaces,
-                &self.action_sender,
-                &spec.output_name,
-                &spec.workspaces,
-            );
+            self.workspaces.render(&spec.workspaces);
         }
         if plan.title {
             self.app_label.set_label(&spec.title.app);
@@ -952,6 +1354,9 @@ impl ReducedSurface {
                 clear_tier_classes(&self.warning_label);
                 self.warning_label.set_visible(false);
             }
+        }
+        if plan.motion {
+            apply_motion_style(&self.window, spec.motion_style, spec.ambient_motion);
         }
 
         self.current_spec = Some(spec.clone());
@@ -990,36 +1395,112 @@ fn bar_window_width_for_monitor_width(monitor_width: i32) -> i32 {
     monitor_width.saturating_sub(SURFACE_MARGIN * 2).max(1)
 }
 
-fn render_workspaces(
-    container: &gtk::Box,
-    action_sender: &Sender<ActionRequest>,
-    output_name: &str,
-    workspaces: &[WorkspaceButtonSpec],
-) {
-    while let Some(child) = container.first_child() {
-        container.remove(&child);
+struct WorkspaceStrip {
+    container: gtk::Box,
+    views: BTreeMap<String, WorkspaceButtonView>,
+    order: Vec<String>,
+    action_sender: Sender<ActionRequest>,
+    output_name: String,
+}
+
+struct WorkspaceButtonView {
+    button: gtk::Button,
+    spec: WorkspaceButtonSpec,
+}
+
+impl WorkspaceStrip {
+    fn new(action_sender: Sender<ActionRequest>, output_name: String) -> Self {
+        let container = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        container.add_css_class("workspace-strip");
+        install_workspace_scroll(&container, action_sender.clone(), output_name.clone());
+        Self {
+            container,
+            views: BTreeMap::new(),
+            order: Vec::new(),
+            action_sender,
+            output_name,
+        }
     }
 
-    for workspace in workspaces {
-        let button = gtk::Button::with_label(&workspace.label);
+    fn widget(&self) -> &gtk::Box {
+        &self.container
+    }
+
+    fn render(&mut self, workspaces: &[WorkspaceButtonSpec]) {
+        let next_order = workspaces
+            .iter()
+            .map(|workspace| workspace.id.clone())
+            .collect::<Vec<_>>();
+        let desired = next_order.iter().cloned().collect::<BTreeSet<_>>();
+        self.views.retain(|id, _| desired.contains(id));
+
+        for spec in workspaces {
+            if let Some(view) = self.views.get_mut(&spec.id) {
+                view.update(spec);
+                continue;
+            }
+            let view = WorkspaceButtonView::new(
+                spec,
+                self.action_sender.clone(),
+                self.output_name.clone(),
+            );
+            flash_class(&view.button, "workspace-new", 420);
+            self.views.insert(spec.id.clone(), view);
+        }
+
+        if self.order != next_order {
+            while let Some(child) = self.container.first_child() {
+                self.container.remove(&child);
+            }
+            for id in &next_order {
+                if let Some(view) = self.views.get(id) {
+                    self.container.append(&view.button);
+                }
+            }
+            self.order = next_order;
+        }
+    }
+}
+
+impl WorkspaceButtonView {
+    fn new(
+        spec: &WorkspaceButtonSpec,
+        action_sender: Sender<ActionRequest>,
+        output_name: String,
+    ) -> Self {
+        let button = gtk::Button::with_label(&spec.label);
         button.add_css_class("workspace-button");
-        update_state_class(&button, "active", workspace.active);
-        update_state_class(&button, "urgent", workspace.urgent);
         button.set_size_request(WORKSPACE_BUTTON_MIN_WIDTH, WORKSPACE_BUTTON_MIN_HEIGHT);
-        button.set_has_frame(workspace.active || workspace.urgent);
-        let sender = action_sender.clone();
-        let output = output_name.to_string();
-        let workspace_id = workspace.id.clone();
+        button.set_has_frame(spec.active || spec.urgent);
+        let workspace_id = spec.id.clone();
+        button.set_tooltip_text(Some(&format!("Switch to workspace {}", spec.label)));
         button.connect_clicked(move |_| {
-            let _ = sender.send(ActionRequest {
-                origin: format!("workspace:{output}:{workspace_id}"),
+            let _ = action_sender.send(ActionRequest {
+                origin: format!("workspace:{output_name}:{workspace_id}"),
                 intent: ActionIntent::SwitchWorkspace {
-                    output: output.clone(),
+                    output: output_name.clone(),
                     workspace: workspace_id.clone(),
                 },
             });
         });
-        container.append(&button);
+        let mut view = Self {
+            button,
+            spec: spec.clone(),
+        };
+        view.update(spec);
+        view
+    }
+
+    fn update(&mut self, spec: &WorkspaceButtonSpec) {
+        let activated = !self.spec.active && spec.active;
+        self.button.set_label(&spec.label);
+        update_state_class(&self.button, "active", spec.active);
+        update_state_class(&self.button, "urgent", spec.urgent);
+        self.button.set_has_frame(spec.active || spec.urgent);
+        if activated {
+            flash_class(&self.button, "workspace-activated", 520);
+        }
+        self.spec = spec.clone();
     }
 }
 
@@ -1101,6 +1582,7 @@ fn install_title_interactions(
 fn install_context_interactions(
     context_row: &gtk::Box,
     current_context: Rc<RefCell<Option<ContextSpec>>>,
+    current_suggestion: Rc<RefCell<Option<Suggestion>>>,
     dismissals: Rc<RefCell<Dismissals>>,
     context_dirty: Rc<Cell<bool>>,
     action_sender: Sender<ActionRequest>,
@@ -1108,6 +1590,7 @@ fn install_context_interactions(
     control_center: Rc<ControlCenterView>,
     coordinator: Rc<RefCell<PopoverCoordinator>>,
     registry: PopoverRegistry,
+    suggestions: Rc<RefCell<SuggestionEngine>>,
 ) {
     let primary = gtk::GestureClick::new();
     primary.set_button(1);
@@ -1140,6 +1623,15 @@ fn install_context_interactions(
     let secondary = gtk::GestureClick::new();
     secondary.set_button(3);
     secondary.connect_pressed(move |_, _, _, _| {
+        if let Some(suggestion) = current_suggestion.borrow().clone() {
+            if suggestions
+                .borrow_mut()
+                .dismiss(&suggestion.id, current_epoch_seconds())
+            {
+                context_dirty.set(true);
+            }
+            return;
+        }
         let Some(context) = current_context.borrow().clone() else {
             return;
         };
@@ -1230,6 +1722,80 @@ fn clear_tier_classes(widget: &impl IsA<gtk::Widget>) {
     widget.remove_css_class("critical");
 }
 
+fn apply_context_motion_classes(widget: &impl IsA<gtk::Widget>, card: &ContextCard) {
+    clear_context_motion_classes(widget);
+    match card {
+        ContextCard::Activity {
+            status: crate::ActivityStatus::Running,
+            ..
+        } => widget.add_css_class("is-running"),
+        ContextCard::Media {
+            status: crate::PlaybackStatus::Playing,
+            ..
+        } => widget.add_css_class("is-playing"),
+        ContextCard::Timer {
+            completed: true, ..
+        } => widget.add_css_class("is-complete"),
+        _ => {}
+    }
+    flash_class(widget, "context-arrived", 560);
+}
+
+fn clear_context_motion_classes(widget: &impl IsA<gtk::Widget>) {
+    for class_name in [
+        "suggestion",
+        "is-running",
+        "is-playing",
+        "is-complete",
+        "context-arrived",
+    ] {
+        widget.remove_css_class(class_name);
+    }
+}
+
+fn apply_motion_style(
+    widget: &impl IsA<gtk::Widget>,
+    style: MotionStyle,
+    ambient_motion: AmbientMotion,
+) {
+    widget.remove_css_class("motion-calm");
+    widget.remove_css_class("motion-bold");
+    widget.remove_css_class("ambient-off");
+    widget.remove_css_class("ambient-meaningful");
+    widget.remove_css_class("ambient-always");
+    widget.add_css_class(match style {
+        MotionStyle::Calm => "motion-calm",
+        MotionStyle::Bold => "motion-bold",
+    });
+    widget.add_css_class(match ambient_motion {
+        AmbientMotion::Off => "ambient-off",
+        AmbientMotion::Meaningful => "ambient-meaningful",
+        AmbientMotion::Always => "ambient-always",
+    });
+}
+
+fn flash_class(widget: &impl IsA<gtk::Widget>, class_name: &str, duration_ms: u64) {
+    if !gtk::Settings::default().is_some_and(|settings| settings.is_gtk_enable_animations()) {
+        return;
+    }
+    let widget = widget.clone().upcast::<gtk::Widget>();
+    let class_name = class_name.to_string();
+    widget.remove_css_class(&class_name);
+    widget.add_css_class(&class_name);
+    glib::timeout_add_local_once(std::time::Duration::from_millis(duration_ms), move || {
+        widget.remove_css_class(&class_name);
+    });
+}
+
+fn current_epoch_seconds() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or_default()
+}
+
 fn update_state_class(widget: &impl IsA<gtk::Widget>, class_name: &str, present: bool) {
     if present {
         widget.add_css_class(class_name);
@@ -1247,6 +1813,9 @@ struct StatusButtonView {
 
 impl StatusButtonView {
     fn update(&mut self, spec: &SystemButtonSpec) {
+        let changed = self.icon.icon_name().as_deref() != Some(spec.icon_name.as_str())
+            || ((self.label.is_visible() || spec.label.is_some())
+                && spec.label.as_deref() != Some(self.label.label().as_str()));
         self.button.set_tooltip_text(Some(&spec.tooltip));
         for class_name in std::mem::take(&mut self.classes) {
             self.button.remove_css_class(&class_name);
@@ -1263,6 +1832,9 @@ impl StatusButtonView {
             self.label.set_label("");
             self.label.set_visible(false);
         }
+        if changed {
+            flash_class(&self.button, "state-changed", 480);
+        }
     }
 }
 
@@ -1272,6 +1844,7 @@ fn build_status_button(
     control_center: Rc<ControlCenterView>,
     coordinator: Rc<RefCell<PopoverCoordinator>>,
     registry: PopoverRegistry,
+    notification_control: Option<NotificationControl>,
 ) -> StatusButtonView {
     let button = gtk::Button::new();
     button.set_has_frame(false);
@@ -1298,6 +1871,20 @@ fn build_status_button(
             registry.clone(),
         );
     });
+
+    if button_spec.id == SystemModuleId::Notifications
+        && let Some(control) = notification_control
+    {
+        let right_click = gtk::GestureClick::new();
+        right_click.set_button(3);
+        right_click.connect_released(move |gesture, _, _, _| {
+            if let Ok(state) = control.snapshot() {
+                let _ = control.set_dnd(!state.dnd);
+            }
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+        });
+        button.add_controller(right_click);
+    }
 
     if button_spec.id == SystemModuleId::Audio {
         install_media_scroll(
@@ -1334,6 +1921,7 @@ fn control_focus(module_id: SystemModuleId) -> ControlCenterFocus {
         SystemModuleId::Bluetooth => ControlCenterFocus::Bluetooth,
         SystemModuleId::Audio => ControlCenterFocus::Audio,
         SystemModuleId::Power => ControlCenterFocus::Power,
+        SystemModuleId::Notifications => ControlCenterFocus::Notifications,
         SystemModuleId::Clock => ControlCenterFocus::Clock,
     }
 }
@@ -1531,7 +2119,10 @@ fn scroll_actions(module_id: SystemModuleId) -> Option<(ActionIntent, ActionInte
                 direction: Direction::Next,
             },
         )),
-        SystemModuleId::Resources | SystemModuleId::Network | SystemModuleId::Clock => None,
+        SystemModuleId::Resources
+        | SystemModuleId::Network
+        | SystemModuleId::Notifications
+        | SystemModuleId::Clock => None,
     }
 }
 
@@ -1540,8 +2131,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::{
-        AppConfig, BarSnapshot, ClockState, Dismissals, OutputRole, OutputState, PowerProfile,
-        PowerState, WindowState, WorkspaceState, reload_runtime_config,
+        ActionIntent, ActivityStatus, AppConfig, BarSnapshot, ClockState, CommandActivity,
+        Dismissals, OutputRole, OutputState, PowerProfile, PowerState, SuggestionEngine,
+        WindowState, WorkspaceState, reload_runtime_config,
     };
 
     use super::{RenderPlan, SurfaceSpec, surface_specs};
@@ -1866,6 +2458,91 @@ mod tests {
     }
 
     #[test]
+    fn related_live_suggestion_enriches_an_imminent_context_card() {
+        let mut snapshot = snapshot([output(
+            "DP-4",
+            &[workspace("1", "1", "DP-4", true, false)],
+            Some(window("notes", "Notes")),
+            false,
+        )]);
+        snapshot.system.power = PowerState {
+            battery_present: true,
+            battery_percent: Some(12),
+            charging: false,
+            profile: PowerProfile::Balanced,
+            changed_at: 7,
+        };
+        let config = AppConfig::default();
+        let mut engine = SuggestionEngine::default();
+        let suggestions =
+            engine.suggestions(&snapshot, &config, snapshot.system.clock.epoch_seconds);
+
+        let specs = super::surface_specs_with_suggestions(
+            &snapshot,
+            &config,
+            &Dismissals::default(),
+            &suggestions,
+        );
+        let primary = &specs[0];
+        assert!(primary.context.is_some());
+        assert_eq!(
+            primary
+                .suggestion
+                .as_ref()
+                .map(|suggestion| suggestion.id.as_str()),
+            Some("live-power-saver")
+        );
+        assert!(matches!(
+            primary
+                .suggestion
+                .as_ref()
+                .map(|suggestion| &suggestion.action),
+            Some(crate::SuggestionAction::Intent(
+                ActionIntent::SetPowerProfile {
+                    profile: PowerProfile::PowerSaver
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn unrelated_suggestion_does_not_displace_running_work() {
+        let mut snapshot = snapshot([output(
+            "DP-4",
+            &[workspace("1", "1", "DP-4", true, false)],
+            Some(window("notes", "Notes")),
+            false,
+        )]);
+        snapshot.system.network.wifi_available = true;
+        snapshot.system.network.wifi_enabled = Some(false);
+        snapshot.activities.items.insert(
+            "build".to_string(),
+            CommandActivity {
+                id: "build".to_string(),
+                label: "Cargo test".to_string(),
+                cwd: "/tmp/project".into(),
+                status: ActivityStatus::Running,
+                started_at: snapshot.system.clock.epoch_seconds,
+                finished_at: None,
+                exit_code: None,
+            },
+        );
+        let config = AppConfig::default();
+        let mut engine = SuggestionEngine::default();
+        let suggestions =
+            engine.suggestions(&snapshot, &config, snapshot.system.clock.epoch_seconds);
+
+        let specs = super::surface_specs_with_suggestions(
+            &snapshot,
+            &config,
+            &Dismissals::default(),
+            &suggestions,
+        );
+        assert!(specs[0].context.is_some());
+        assert!(specs[0].suggestion.is_none());
+    }
+
+    #[test]
     fn render_plan_skips_workspace_rebuilds_for_clock_only_changes() {
         let previous = SurfaceSpec {
             output_name: "DP-5".to_string(),
@@ -1883,8 +2560,13 @@ mod tests {
             },
             context: None,
             warning: None,
+            suggestion: None,
+            control_suggestions: Vec::new(),
+            notification: None,
             system: None,
             clock_label: "12:00".to_string(),
+            motion_style: crate::MotionStyle::Bold,
+            ambient_motion: crate::AmbientMotion::Meaningful,
         };
         let next = SurfaceSpec {
             clock_label: "12:01".to_string(),

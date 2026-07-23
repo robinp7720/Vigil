@@ -15,7 +15,9 @@ use crate::{
     BluetoothDeviceOperation, BluetoothDeviceState, BluetoothPairingPrompt,
     BluetoothPairingPromptKind, BluetoothPairingResponse, CalendarAgenda, CalendarAgendaEvent,
     CalendarMonthRequest, ConnectivityState, DesktopContext, Direction, KeyboardLayoutOption,
-    KeyboardLayoutState, MediaControlAction, PlaybackStatus, PowerProfile, SourceHealth, SourceId,
+    KeyboardLayoutState, MediaControlAction, Notification, NotificationControl, NotificationState,
+    NotificationUrgency, PlaybackStatus, PowerProfile, SourceHealth, SourceId, Suggestion,
+    SuggestionAction, SuggestionEngine,
 };
 
 use super::artwork::{
@@ -32,10 +34,11 @@ pub enum ControlCenterFocus {
     Audio,
     Power,
     Clock,
+    Notifications,
 }
 
 impl ControlCenterFocus {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Overview,
         Self::Keyboard,
         Self::Resources,
@@ -44,6 +47,7 @@ impl ControlCenterFocus {
         Self::Audio,
         Self::Power,
         Self::Clock,
+        Self::Notifications,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -56,6 +60,7 @@ impl ControlCenterFocus {
             Self::Audio => "audio",
             Self::Power => "power",
             Self::Clock => "clock",
+            Self::Notifications => "notifications",
         }
     }
 
@@ -69,6 +74,7 @@ impl ControlCenterFocus {
             Self::Audio => "Audio",
             Self::Power => "Power",
             Self::Clock => "Time & Focus",
+            Self::Notifications => "Notifications",
         }
     }
 
@@ -82,6 +88,7 @@ impl ControlCenterFocus {
             Self::Audio => "Volume and playback",
             Self::Power => "Performance and energy",
             Self::Clock => "Calendar and timers",
+            Self::Notifications => "Recent alerts and actions",
         }
     }
 
@@ -95,6 +102,7 @@ impl ControlCenterFocus {
             Self::Audio => "audio",
             Self::Power => "power",
             Self::Clock => "calendar",
+            Self::Notifications => "notifications",
         }
     }
 }
@@ -110,6 +118,7 @@ impl From<DesktopContext> for ControlCenterFocus {
             DesktopContext::Audio => Self::Audio,
             DesktopContext::Power => Self::Power,
             DesktopContext::Clock => Self::Clock,
+            DesktopContext::Notifications => Self::Notifications,
         }
     }
 }
@@ -125,6 +134,7 @@ impl From<ControlCenterFocus> for DesktopContext {
             ControlCenterFocus::Audio => Self::Audio,
             ControlCenterFocus::Power => Self::Power,
             ControlCenterFocus::Clock => Self::Clock,
+            ControlCenterFocus::Notifications => Self::Notifications,
         }
     }
 }
@@ -257,6 +267,7 @@ pub struct ControlCenterSpec {
     pub calendar_agenda_error: Option<String>,
     pub timers: Vec<TimerControlSpec>,
     pub media: Option<MediaControlSpec>,
+    pub notifications: NotificationState,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -446,6 +457,7 @@ pub fn build_control_center_spec(snapshot: &BarSnapshot) -> ControlCenterSpec {
             })
             .collect(),
         media,
+        notifications: system.notifications.clone(),
     }
 }
 
@@ -731,6 +743,7 @@ impl NavigationUi {
     }
 
     fn render_error(&self) {
+        self.error_slot.remove_css_class("is-success");
         if let Some(message) = self.errors.borrow().message(self.page.get()) {
             self.error_label.set_label(message);
             self.error_slot.set_visible(true);
@@ -769,6 +782,21 @@ impl NavigationUi {
         }
         drop(pending);
         self.render_error();
+    }
+
+    fn flash_success(&self) {
+        self.error_label.set_label("Change applied");
+        self.error_slot.set_visible(true);
+        self.error_slot.remove_css_class("has-error");
+        self.error_slot.remove_css_class("is-pending");
+        self.error_slot.add_css_class("is-success");
+        let slot = self.error_slot.clone();
+        glib::timeout_add_local_once(Duration::from_millis(900), move || {
+            if slot.has_css_class("is-success") {
+                slot.remove_css_class("is-success");
+                slot.set_visible(false);
+            }
+        });
     }
 }
 
@@ -1231,6 +1259,15 @@ fn animations_enabled() -> bool {
     gtk::Settings::default().is_some_and(|settings| settings.is_gtk_enable_animations())
 }
 
+fn current_epoch_seconds() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or_default()
+}
+
 struct MetricGauge {
     root: gtk::Box,
     value: gtk::Label,
@@ -1257,6 +1294,12 @@ pub struct ControlCenterView {
     motion: Rc<ControlCenterMotion>,
     current: Rc<RefCell<ControlCenterSpec>>,
     navigation: NavigationUi,
+    suggestion_list: gtk::Box,
+    suggestion_specs: RefCell<Vec<Suggestion>>,
+    suggestion_rows: RefCell<BTreeMap<String, gtk::Box>>,
+    routine_learning: gtk::Switch,
+    suggestion_engine: Rc<RefCell<SuggestionEngine>>,
+    suggestion_dirty: Rc<Cell<bool>>,
     network_tile: ToggleTile,
     bluetooth_tile: ToggleTile,
     audio_tile: ToggleTile,
@@ -1296,6 +1339,10 @@ pub struct ControlCenterView {
     suppress_controls: Rc<Cell<bool>>,
     bluetooth_discovery_active: Rc<Cell<bool>>,
     timer_sender: Sender<ActionRequest>,
+    notification_list: gtk::Box,
+    notification_specs: RefCell<Vec<Notification>>,
+    notification_dnd: gtk::Switch,
+    notification_control: Option<NotificationControl>,
 }
 
 impl ControlCenterView {
@@ -1309,6 +1356,9 @@ impl ControlCenterView {
         spec: &ControlCenterSpec,
         action_sender: Sender<ActionRequest>,
         calendar_sender: Option<Sender<CalendarMonthRequest>>,
+        suggestion_engine: Rc<RefCell<SuggestionEngine>>,
+        suggestion_dirty: Rc<Cell<bool>>,
+        notification_control: Option<NotificationControl>,
     ) -> Self {
         let window = gtk::ApplicationWindow::builder()
             .application(application)
@@ -1421,6 +1471,29 @@ impl ControlCenterView {
 
         let overview = gtk::Box::new(gtk::Orientation::Vertical, 12);
         overview.add_css_class("control-page");
+        let suggestion_section = gtk::Box::new(gtk::Orientation::Vertical, 7);
+        suggestion_section.add_css_class("suggestion-section");
+        suggestion_section.set_visible(true);
+        suggestion_section.append(&section_eyebrow("SUGGESTED NOW"));
+        let suggestion_list = gtk::Box::new(gtk::Orientation::Vertical, 7);
+        suggestion_list.add_css_class("suggestion-list");
+        suggestion_section.append(&suggestion_list);
+        let routine_controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        routine_controls.add_css_class("routine-controls");
+        let routine_label = gtk::Label::new(Some("Learn local routines"));
+        routine_label.set_xalign(0.0);
+        routine_label.set_hexpand(true);
+        let routine_learning = gtk::Switch::new();
+        routine_learning.set_valign(gtk::Align::Center);
+        routine_learning.set_active(suggestion_engine.borrow().learning_enabled());
+        let clear_routines = gtk::Button::with_label("Clear");
+        clear_routines.add_css_class("compact-action");
+        clear_routines.set_tooltip_text(Some("Clear all locally learned routine data"));
+        routine_controls.append(&routine_label);
+        routine_controls.append(&routine_learning);
+        routine_controls.append(&clear_routines);
+        suggestion_section.append(&routine_controls);
+        overview.append(&suggestion_section);
         let quick_grid = gtk::Grid::new();
         quick_grid.add_css_class("control-grid");
         quick_grid.set_row_spacing(8);
@@ -1600,7 +1673,36 @@ impl ControlCenterView {
             calendar_sender,
         );
         stack.add_named(&time_page.root, Some(ControlCenterFocus::Clock.as_str()));
+        let notifications_page = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        notifications_page.add_css_class("control-page");
+        notifications_page.add_css_class("notifications-page");
+        let notification_controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        notification_controls.add_css_class("notification-controls");
+        let dnd_label = gtk::Label::new(Some("Do Not Disturb"));
+        dnd_label.set_xalign(0.0);
+        dnd_label.set_hexpand(true);
+        let notification_dnd = gtk::Switch::new();
+        notification_dnd.set_valign(gtk::Align::Center);
+        let clear_notifications = gtk::Button::with_label("Clear all");
+        clear_notifications.add_css_class("compact-action");
+        notification_controls.append(&dnd_label);
+        notification_controls.append(&notification_dnd);
+        notification_controls.append(&clear_notifications);
+        notifications_page.append(&notification_controls);
+        let notification_scroll = gtk::ScrolledWindow::new();
+        notification_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        notification_scroll.set_min_content_height(280);
+        notification_scroll.set_max_content_height(620);
+        let notification_list = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        notification_list.add_css_class("notification-list");
+        notification_scroll.set_child(Some(&notification_list));
+        notifications_page.append(&notification_scroll);
+        stack.add_named(
+            &notifications_page,
+            Some(ControlCenterFocus::Notifications.as_str()),
+        );
         let time_page_for_navigation = time_page.clone();
+        let notification_control_for_navigation = notification_control.clone();
         *navigation.page_changed.borrow_mut() = Some(Rc::new(move |page| {
             sync_bluetooth_discovery(
                 &discovery_sender,
@@ -1611,6 +1713,11 @@ impl ControlCenterView {
             if page == ControlCenterFocus::Clock {
                 reset_time_page(&time_page_for_navigation);
             }
+            if page == ControlCenterFocus::Notifications
+                && let Some(control) = &notification_control_for_navigation
+            {
+                let _ = control.mark_read();
+            }
         }));
 
         root.append(&stack);
@@ -1619,6 +1726,45 @@ impl ControlCenterView {
         window.set_child(Some(&root));
 
         let motion = Rc::new(ControlCenterMotion::new(&window, &root));
+
+        {
+            let suggestion_engine = suggestion_engine.clone();
+            let suggestion_dirty = suggestion_dirty.clone();
+            routine_learning.connect_active_notify(move |switch| {
+                suggestion_engine
+                    .borrow_mut()
+                    .set_learning_enabled(switch.is_active());
+                suggestion_dirty.set(true);
+            });
+        }
+        {
+            let suggestion_engine = suggestion_engine.clone();
+            let suggestion_dirty = suggestion_dirty.clone();
+            clear_routines.connect_clicked(move |_| {
+                suggestion_engine.borrow_mut().clear_history();
+                suggestion_dirty.set(true);
+            });
+        }
+        {
+            let notification_control = notification_control.clone();
+            let suppress_controls = suppress_controls.clone();
+            notification_dnd.connect_active_notify(move |switch| {
+                if suppress_controls.get() {
+                    return;
+                }
+                if let Some(control) = &notification_control {
+                    let _ = control.set_dnd(switch.is_active());
+                }
+            });
+        }
+        {
+            let notification_control = notification_control.clone();
+            clear_notifications.connect_clicked(move |_| {
+                if let Some(control) = &notification_control {
+                    let _ = control.clear();
+                }
+            });
+        }
 
         let nav_for_back = navigation.clone();
         back_button.connect_clicked(move |_| {
@@ -1795,6 +1941,12 @@ impl ControlCenterView {
             motion,
             current,
             navigation,
+            suggestion_list,
+            suggestion_specs: RefCell::new(Vec::new()),
+            suggestion_rows: RefCell::new(BTreeMap::new()),
+            routine_learning,
+            suggestion_engine,
+            suggestion_dirty,
             network_tile,
             bluetooth_tile,
             audio_tile,
@@ -1834,6 +1986,10 @@ impl ControlCenterView {
             suppress_controls,
             bluetooth_discovery_active,
             timer_sender: action_sender,
+            notification_list,
+            notification_specs: RefCell::new(Vec::new()),
+            notification_dnd,
+            notification_control,
         };
         view.navigation
             .navigate(ControlCenterFocus::Overview, false);
@@ -2074,6 +2230,8 @@ impl ControlCenterView {
             self.navigation.clone(),
         );
         self.clock_label.set_label(&spec.clock);
+        self.notification_dnd.set_active(spec.notifications.dnd);
+        self.update_notifications(&spec.notifications);
         let unavailable_page = match self.navigation.page.get() {
             ControlCenterFocus::Network => !spec.network.available,
             ControlCenterFocus::Bluetooth => !spec.bluetooth.available,
@@ -2085,10 +2243,82 @@ impl ControlCenterView {
         self.suppress_controls.set(false);
     }
 
+    fn update_notifications(&self, state: &NotificationState) {
+        if self.notification_specs.borrow().as_slice() == state.items.as_slice() {
+            return;
+        }
+        while let Some(child) = self.notification_list.first_child() {
+            self.notification_list.remove(&child);
+        }
+        *self.notification_specs.borrow_mut() = state.items.clone();
+        if state.items.iter().all(|item| item.duplicate_count == 0) {
+            let empty = gtk::Label::new(Some("You’re all caught up"));
+            empty.add_css_class("notification-empty");
+            empty.set_margin_top(28);
+            empty.set_margin_bottom(28);
+            self.notification_list.append(&empty);
+            return;
+        }
+        for notification in &state.items {
+            if notification.duplicate_count == 0 {
+                continue;
+            }
+            self.notification_list.append(&notification_row(
+                notification,
+                self.notification_control.as_ref(),
+                false,
+            ));
+        }
+    }
+
+    pub fn update_suggestions(&self, suggestions: &[Suggestion]) {
+        self.routine_learning
+            .set_active(self.suggestion_engine.borrow().learning_enabled());
+        if self.suggestion_specs.borrow().as_slice() == suggestions {
+            return;
+        }
+        while let Some(child) = self.suggestion_list.first_child() {
+            self.suggestion_list.remove(&child);
+        }
+        self.suggestion_rows.borrow_mut().clear();
+        *self.suggestion_specs.borrow_mut() = suggestions.to_vec();
+        self.suggestion_list.set_visible(!suggestions.is_empty());
+
+        for suggestion in suggestions {
+            let row = suggestion_row(
+                suggestion,
+                self.timer_sender.clone(),
+                self.navigation.clone(),
+                self.suggestion_engine.clone(),
+                self.suggestion_dirty.clone(),
+            );
+            self.suggestion_rows
+                .borrow_mut()
+                .insert(suggestion.id.clone(), row.clone());
+            self.suggestion_list.append(&row);
+        }
+    }
+
     pub fn handle_completion(&self, completion: &ActionCompletion) -> bool {
+        if let Some(id) = completion.origin.strip_prefix("suggestion-action|")
+            && let Some(row) = self.suggestion_rows.borrow().get(id)
+        {
+            row.remove_css_class("is-pending");
+            row.add_css_class(match completion.result {
+                ActionResult::Completed => "is-success",
+                ActionResult::Failed { .. } => "is-failure",
+            });
+            let row = row.clone();
+            glib::timeout_add_local_once(Duration::from_millis(720), move || {
+                row.remove_css_class("is-success");
+                row.remove_css_class("is-failure");
+            });
+            return true;
+        }
         let Some(focus) = focus_from_origin(&completion.origin) else {
             return false;
         };
+        let completed = matches!(completion.result, ActionResult::Completed);
         match &completion.result {
             ActionResult::Completed => self.errors.borrow_mut().retry(focus),
             ActionResult::Failed { detail, .. } => {
@@ -2099,6 +2329,9 @@ impl ControlCenterView {
             }
         }
         self.navigation.finish_action(focus);
+        if completed {
+            self.navigation.flash_success();
+        }
         true
     }
 }
@@ -2221,6 +2454,233 @@ fn summary_tile(icon_name: &str, title: &str) -> (gtk::Button, gtk::Label) {
     column.append(&value);
     button.set_child(Some(&column));
     (button, value)
+}
+
+pub(super) fn notification_row(
+    notification: &Notification,
+    control: Option<&NotificationControl>,
+    compact: bool,
+) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    row.add_css_class("notification-card");
+    row.add_css_class(match notification.urgency {
+        NotificationUrgency::Low => "urgency-low",
+        NotificationUrgency::Normal => "urgency-normal",
+        NotificationUrgency::Critical => "urgency-critical",
+    });
+    if compact {
+        row.add_css_class("notification-toast");
+        if let Some(control) = control.cloned() {
+            let hover = gtk::EventControllerMotion::new();
+            let enter_control = control.clone();
+            let id = notification.id;
+            hover.connect_enter(move |_, _, _| {
+                let _ = enter_control.set_hovered(id, true);
+            });
+            hover.connect_leave(move |_| {
+                let _ = control.set_hovered(id, false);
+            });
+            row.add_controller(hover);
+        }
+    }
+    row.set_accessible_role(gtk::AccessibleRole::Group);
+    row.update_property(&[gtk::accessible::Property::Label(&format!(
+        "{}: {}",
+        notification.app_name, notification.summary
+    ))]);
+
+    let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let icon = notification_icon(notification);
+    icon.set_pixel_size(if compact { 28 } else { 34 });
+    header.append(&icon);
+    let app = gtk::Label::new(Some(&if notification.duplicate_count > 1 {
+        format!(
+            "{} · {} similar",
+            notification.app_name, notification.duplicate_count
+        )
+    } else {
+        notification.app_name.clone()
+    }));
+    app.add_css_class("notification-app");
+    app.set_xalign(0.0);
+    app.set_hexpand(true);
+    header.append(&app);
+    let dismiss = icon_button("window-close-symbolic", "Dismiss notification");
+    dismiss.add_css_class("notification-dismiss");
+    if let Some(control) = control.cloned() {
+        let id = notification.id;
+        dismiss.connect_clicked(move |_| {
+            let _ = control.dismiss(id);
+        });
+    } else {
+        dismiss.set_sensitive(false);
+    }
+    header.append(&dismiss);
+    row.append(&header);
+
+    let summary = gtk::Label::new(Some(&notification.summary));
+    summary.add_css_class("notification-summary");
+    summary.set_xalign(0.0);
+    summary.set_wrap(true);
+    summary.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    row.append(&summary);
+
+    if !notification.body.is_empty() {
+        let body = gtk::Label::new(None);
+        body.add_css_class("notification-body");
+        body.set_xalign(0.0);
+        body.set_wrap(true);
+        body.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        body.set_lines(if compact { 4 } else { 8 });
+        body.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        if gtk::pango::parse_markup(&notification.body, '\0').is_ok() {
+            body.set_markup(&notification.body);
+            body.connect_activate_link(|_, uri| {
+                if matches!(uri.split(':').next(), Some("http" | "https" | "mailto")) {
+                    let _ = gtk::gio::AppInfo::launch_default_for_uri(
+                        uri,
+                        None::<&gtk::gio::AppLaunchContext>,
+                    );
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                }
+            });
+        } else {
+            body.set_label(&notification.body);
+        }
+        row.append(&body);
+    }
+
+    if let Some(path) = notification
+        .image_path
+        .as_ref()
+        .filter(|path| path.is_file())
+    {
+        let picture = gtk::Picture::for_filename(path);
+        picture.add_css_class("notification-image");
+        picture.set_can_shrink(true);
+        picture.set_content_fit(gtk::ContentFit::Cover);
+        picture.set_size_request(
+            if compact { 320 } else { 410 },
+            if compact { 140 } else { 180 },
+        );
+        row.append(&picture);
+    }
+    if let Some(progress) = notification.progress {
+        let progress_bar = gtk::ProgressBar::new();
+        progress_bar.set_fraction(f64::from(progress) / 100.0);
+        progress_bar.set_text(Some(&format!("{progress}%")));
+        progress_bar.set_show_text(true);
+        row.append(&progress_bar);
+    }
+
+    if notification.actionable && !notification.actions.is_empty() {
+        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        actions.add_css_class("notification-actions");
+        for action in notification.actions.iter().take(3) {
+            let button = gtk::Button::with_label(&action.label);
+            button.add_css_class("notification-action");
+            if let Some(control) = control.cloned() {
+                let id = notification.id;
+                let key = action.key.clone();
+                button.connect_clicked(move |_| {
+                    let _ = control.invoke(id, key.clone());
+                });
+            } else {
+                button.set_sensitive(false);
+            }
+            actions.append(&button);
+        }
+        row.append(&actions);
+    }
+    row
+}
+
+fn notification_icon(notification: &Notification) -> gtk::Image {
+    if let Some(icon) = notification.app_icon.as_deref() {
+        let path = icon
+            .strip_prefix("file://")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(icon));
+        if path.is_absolute() && path.is_file() {
+            return gtk::Image::from_file(path);
+        }
+        if !icon.contains('/') {
+            return gtk::Image::from_icon_name(icon);
+        }
+    }
+    gtk::Image::from_icon_name("preferences-system-notifications-symbolic")
+}
+
+fn suggestion_row(
+    suggestion: &Suggestion,
+    action_sender: Sender<ActionRequest>,
+    navigation: NavigationUi,
+    suggestion_engine: Rc<RefCell<SuggestionEngine>>,
+    suggestion_dirty: Rc<Cell<bool>>,
+) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    row.add_css_class("suggestion-card");
+    row.update_property(&[
+        gtk::accessible::Property::Label(&suggestion.title),
+        gtk::accessible::Property::Description(&suggestion.reason),
+    ]);
+
+    let icon = gtk::Image::from_icon_name(&suggestion.icon_name);
+    icon.add_css_class("suggestion-card-icon");
+    let copy = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    copy.set_hexpand(true);
+    let title = gtk::Label::new(Some(&suggestion.title));
+    title.add_css_class("suggestion-card-title");
+    title.set_xalign(0.0);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    let reason = gtk::Label::new(Some(&suggestion.reason));
+    reason.add_css_class("supporting-text");
+    reason.set_xalign(0.0);
+    reason.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    copy.append(&title);
+    copy.append(&reason);
+
+    let action = gtk::Button::with_label(&suggestion.action_label);
+    action.add_css_class("suggestion-card-action");
+    action.set_tooltip_text(Some(&suggestion.reason));
+    let dismiss = icon_button("window-close-symbolic", "Dismiss suggestion");
+    dismiss.add_css_class("suggestion-card-dismiss");
+
+    {
+        let suggestion = suggestion.clone();
+        let row = row.clone();
+        action.connect_clicked(move |_| match suggestion.action.clone() {
+            SuggestionAction::Intent(intent) => {
+                row.add_css_class("is-pending");
+                let _ = action_sender.send(ActionRequest {
+                    origin: format!("suggestion-action|{}", suggestion.id),
+                    intent,
+                });
+            }
+            SuggestionAction::OpenControlCenter(context) => {
+                navigation.navigate(context.into(), false);
+            }
+        });
+    }
+    {
+        let id = suggestion.id.clone();
+        dismiss.connect_clicked(move |_| {
+            if suggestion_engine
+                .borrow_mut()
+                .dismiss(&id, current_epoch_seconds())
+            {
+                suggestion_dirty.set(true);
+            }
+        });
+    }
+
+    row.append(&icon);
+    row.append(&copy);
+    row.append(&action);
+    row.append(&dismiss);
+    row
 }
 
 fn network_page() -> NetworkPage {

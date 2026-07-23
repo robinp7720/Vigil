@@ -43,6 +43,46 @@ available to the urgency card, lock screen, and legacy Waybar fallback.
 The calendar's weekday/month names follow the system locale by default; set `locale` in
 `config.toml` (e.g. `locale = "de_DE.UTF-8"`) to override it independently of the environment.
 
+## Native notifications
+
+Vigil owns `org.freedesktop.Notifications` and replaces Dunst while the service
+is active. New notifications can take over the ambient center island, appear
+as a three-card toast stack on the focused output, and remain searchable in a
+seven-day/100-item inbox. Toast timeouts pause on hover; critical notifications
+remain visible until dismissed.
+
+Open the notification status button to mark the inbox read. Right-click it to
+toggle Do Not Disturb. DND queues low and normal notifications silently while
+letting critical alerts through. Images, progress, markup, hyperlinks, sounds,
+replacement IDs, and application actions are handled natively. State stays
+user-only under `${XDG_STATE_HOME:-~/.local/state}/vigil/notifications.json`;
+cached image data lives under `${XDG_CACHE_HOME:-~/.cache}/vigil/notifications`.
+Vigil intentionally starts with a clean history and does not import Dunst data.
+
+## Expressive cockpit and local routines
+
+Vigil uses keyed widgets and a shared motion language for workspace, context,
+status, and quick-settings changes. Bold motion and meaningful live-state
+loops are enabled by the tracked configuration, while GTK's reduced-motion
+setting disables transforms and looping effects.
+
+The center island may offer one explicit action when live state suggests a
+useful next step. Vigil never executes a suggestion automatically. The control
+center shows up to three suggestions with their reasons and provides controls
+to pause or clear local routine learning.
+
+Successful discrete actions can become routine suggestions after three
+matching occurrences on distinct days. Routine observations are stored
+user-only at `${XDG_STATE_HOME:-~/.local/state}/vigil/routines.json`, expire
+after 30 days by default, and never leave the machine.
+
+For deterministic visual review in a graphical Wayland session:
+
+```bash
+cargo run -- --config ../../bar/config.toml __preview --scenario suggestion
+cargo run -- --config ../../bar/config.toml __preview --scenario control-center
+```
+
 ## Migration from Cockpit Bar
 
 After building Vigil, run `./setup.sh` to install the new binary, configuration,
@@ -70,6 +110,7 @@ rm -f ~/.config/systemd/user/vigil.service
 rm -f ~/.local/bin/vigil
 rm -f ~/.config/vigil
 systemctl --user daemon-reload
+systemctl --user restart dunst.service
 ~/.config/waybar/launch.sh --replace
 ```
 

@@ -19,7 +19,7 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use gtk::glib;
 use gtk::prelude::*;
 use gtk4 as gtk;
@@ -28,12 +28,12 @@ use tracing::warn;
 use crate::{
     ActionCompletion, ActionRequest, ActionResult, ActionRouter, ActivityStatus, ActivityTracker,
     ActivityUpdate, AppConfig, CalendarMonthRequest, CommandActivity, ControlRequest,
-    ControlResponse, ControlSocket, ReloadStatus, SourceHealth, SourceId, StateStore, StateUpdate,
-    SystemActionBackend, SystemUpdate, TimerStore, context_snapshots, detect_compositor,
-    intent_for_context_action, reload_runtime_config, spawn_action_worker, spawn_audio_source,
-    spawn_bluetooth_source, spawn_brightness_source, spawn_calendar_agenda_source,
-    spawn_clock_source, spawn_media_source, spawn_network_source, spawn_power_source,
-    spawn_resource_source,
+    ControlResponse, ControlSocket, NotificationControl, ReloadStatus, SourceHealth, SourceId,
+    StateStore, StateUpdate, SuggestionEngine, SystemActionBackend, SystemUpdate, TimerStore,
+    context_snapshots, detect_compositor, intent_for_context_action, reload_runtime_config,
+    spawn_action_worker, spawn_audio_source, spawn_bluetooth_source, spawn_brightness_source,
+    spawn_calendar_agenda_source, spawn_clock_source, spawn_media_source, spawn_network_source,
+    spawn_notification_server, spawn_power_source, spawn_resource_source,
 };
 
 pub use surface::{PrimarySurface, ReducedSurface, SurfaceRegistry, surface_specs};
@@ -112,9 +112,243 @@ impl BarApplication {
     }
 
     pub fn run(self) {
-        self.application.run();
+        self.application.run_with_args(&["vigil"]);
         self.runtime.shutdown();
     }
+}
+
+pub fn run_preview(config_path: &Path, scenario: &str) -> Result<()> {
+    let config = AppConfig::load(config_path)?;
+    let application = gtk::Application::builder()
+        .application_id("me.robindecker.Vigil.Preview")
+        .build();
+    let registry = Rc::new(RefCell::new(None::<SurfaceRegistry>));
+    let registry_for_activate = registry.clone();
+    let config_path = config_path.to_path_buf();
+    let scenario = scenario.to_string();
+
+    application.connect_activate(move |application| {
+        let mut preview_config = config.clone();
+        let Some(display) = gtk::gdk::Display::default() else {
+            warn!("preview requires a graphical Wayland session");
+            application.quit();
+            return;
+        };
+        if let Err(error) = theme::load_css(&display, &config_path) {
+            warn!("preview theme unavailable: {error:#}");
+        }
+        if scenario == "reduced-motion"
+            && let Some(settings) = gtk::Settings::default()
+        {
+            settings.set_gtk_enable_animations(false);
+        }
+
+        let monitors = display.monitors();
+        let connectors = (0..monitors.n_items())
+            .filter_map(|index| monitors.item(index))
+            .filter_map(|item| item.downcast::<gtk::gdk::Monitor>().ok())
+            .filter_map(|monitor| monitor.connector().map(|name| name.to_string()))
+            .collect::<Vec<_>>();
+        let Some(primary) = connectors.first().cloned() else {
+            warn!("preview could not resolve a monitor connector");
+            application.quit();
+            return;
+        };
+
+        preview_config.primary_output = Some(primary.clone());
+        let now_epoch = current_epoch();
+        let snapshot = preview_snapshot(&connectors, &scenario, now_epoch);
+        let mut suggestion_engine = SuggestionEngine::default();
+        if scenario == "routine" {
+            let action = crate::ActionIntent::SetPowerProfile {
+                profile: crate::PowerProfile::Performance,
+            };
+            for days_ago in [3_i64, 2, 1] {
+                let _ = suggestion_engine.record_success(
+                    "preview",
+                    &action,
+                    &snapshot,
+                    &preview_config.routines,
+                    now_epoch.saturating_sub(days_ago * 24 * 60 * 60),
+                );
+            }
+        }
+
+        let (action_tx, _action_rx) = mpsc::channel();
+        let mut surfaces = SurfaceRegistry::with_suggestion_engine(None, suggestion_engine);
+        surfaces.reconcile(application, &snapshot, &preview_config, &action_tx);
+        if scenario == "control-center" {
+            surfaces.open_control_center(crate::DesktopContext::Overview, Some(&primary));
+        }
+        *registry_for_activate.borrow_mut() = Some(surfaces);
+    });
+
+    application.run_with_args(&["vigil-preview"]);
+    if let Some(mut registry) = registry.borrow_mut().take() {
+        registry.clear();
+    }
+    Ok(())
+}
+
+fn preview_snapshot(connectors: &[String], scenario: &str, now_epoch: i64) -> crate::BarSnapshot {
+    let outputs = connectors
+        .iter()
+        .enumerate()
+        .map(|(index, connector)| {
+            let active_workspace = format!("{}", index * 3 + 1);
+            let workspaces = (0..3)
+                .map(|offset| {
+                    let label = format!("{}", index * 3 + offset + 1);
+                    crate::WorkspaceState {
+                        id: label.clone(),
+                        label: if offset == 1 {
+                            "code".to_string()
+                        } else {
+                            label.clone()
+                        },
+                        output: connector.clone(),
+                        active: label == active_workspace,
+                        urgent: scenario == "escalation" && index == 0 && offset == 2,
+                        changed_at: now_epoch,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let window = crate::WindowState {
+                id: format!("preview-window-{index}"),
+                app_id: Some(if index == 0 { "Code" } else { "Terminal" }.to_string()),
+                title: if index == 0 {
+                    "Vigil — expressive cockpit".to_string()
+                } else {
+                    "cargo test".to_string()
+                },
+                urgent: false,
+                workspace_id: Some(active_workspace),
+                changed_at: now_epoch,
+            };
+            (
+                connector.clone(),
+                crate::OutputState {
+                    name: connector.clone(),
+                    workspaces,
+                    windows: vec![window.clone()],
+                    focused_window: Some(window),
+                    urgent: false,
+                    changed_at: now_epoch,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let mut snapshot = crate::BarSnapshot {
+        focused_output: connectors.first().cloned(),
+        outputs,
+        system: crate::SystemState {
+            keyboard_layout: crate::KeyboardLayoutState {
+                current_index: Some(0),
+                current_name: Some("English (US)".to_string()),
+                layouts: vec![
+                    crate::KeyboardLayoutOption {
+                        index: 0,
+                        name: "English (US)".to_string(),
+                        layout: Some("us".to_string()),
+                        variant: None,
+                    },
+                    crate::KeyboardLayoutOption {
+                        index: 1,
+                        name: "German".to_string(),
+                        layout: Some("de".to_string()),
+                        variant: None,
+                    },
+                ],
+            },
+            resources: crate::ResourceState {
+                cpu_percent: Some(42),
+                memory_percent: Some(58),
+            },
+            network: crate::NetworkState {
+                connectivity: crate::ConnectivityState::Connected,
+                label: Some("Studio Wi-Fi".to_string()),
+                wifi_available: true,
+                wifi_enabled: Some(true),
+                interface: Some("wlan0".to_string()),
+                ..crate::NetworkState::default()
+            },
+            bluetooth: crate::BluetoothState {
+                available: true,
+                powered: true,
+                connected_device: Some("Studio Headphones".to_string()),
+                audio_device: Some("Studio Headphones".to_string()),
+                ..crate::BluetoothState::default()
+            },
+            audio: crate::AudioState {
+                volume_percent: Some(64),
+                muted: false,
+                outputs: vec![crate::AudioOutputState {
+                    name: "preview-output".to_string(),
+                    description: "Studio Headphones".to_string(),
+                    alias: None,
+                    port_description: None,
+                    port_type: Some("headphones".to_string()),
+                    bus: Some("bluetooth".to_string()),
+                    is_default: true,
+                }],
+            },
+            brightness: crate::BrightnessState {
+                device: Some("preview-backlight".to_string()),
+                percent: Some(72),
+            },
+            power: crate::PowerState {
+                battery_present: true,
+                battery_percent: Some(78),
+                charging: false,
+                profile: crate::PowerProfile::Balanced,
+                changed_at: now_epoch,
+            },
+            clock: crate::ClockState {
+                epoch_seconds: now_epoch,
+                label: "16:42".to_string(),
+            },
+            ..crate::SystemState::default()
+        },
+        ..crate::BarSnapshot::default()
+    };
+
+    match scenario {
+        "escalation" => {
+            snapshot.system.power.battery_percent = Some(6);
+        }
+        "suggestion" => {
+            snapshot.system.audio.muted = true;
+            snapshot.system.media = Some(crate::MediaState {
+                player: "preview-player".to_string(),
+                status: crate::PlaybackStatus::Playing,
+                title: Some("Electric Feel".to_string()),
+                artist: Some("MGMT".to_string()),
+                changed_at: now_epoch,
+                ..crate::MediaState::default()
+            });
+        }
+        "control-center" => {
+            snapshot.system.calendar = Some(crate::CalendarEvent {
+                id: "preview-event".to_string(),
+                title: "Design review".to_string(),
+                location: Some("Studio".to_string()),
+                start_epoch: now_epoch + 45 * 60,
+                end_epoch: Some(now_epoch + 75 * 60),
+                changed_at: now_epoch,
+            });
+            snapshot.system.timers.push(crate::TimerState {
+                id: "preview-timer".to_string(),
+                label: "Deep work".to_string(),
+                remaining_seconds: 4 * 60,
+                target_epoch: Some(now_epoch + 4 * 60),
+                completed: false,
+                changed_at: now_epoch,
+            });
+        }
+        _ => {}
+    }
+    snapshot
 }
 
 impl RuntimeHandles {
@@ -239,7 +473,12 @@ fn drain_updates(runtime: &mut UiRuntime, now_epoch: i64) -> bool {
                     };
                     let _ = response_tx.send(response);
                 }
-                dirty |= runtime.registry.handle_completion(&completion);
+                dirty |= runtime.registry.handle_completion(
+                    &completion,
+                    runtime.store.snapshot(),
+                    &runtime.config,
+                    now_epoch,
+                );
                 if let ActionResult::Failed { detail, .. } = &completion.result {
                     warn!("action {} failed: {}", completion.origin, detail);
                 }
@@ -274,13 +513,25 @@ fn start_runtime(config: AppConfig, config_path: &Path) -> Result<(UiRuntime, Ru
             Arc::clone(&cancelled),
             Arc::clone(&timer_store),
         ),
-        spawn_control_socket_server(
+    ];
+    let notification_control = if config.notifications.enabled {
+        let (control, handle) = spawn_notification_server(
+            config.notifications.clone(),
             state_tx.clone(),
             Arc::clone(&cancelled),
-            Arc::clone(&timer_store),
-            control_tx,
-        )?,
-    ];
+        )?;
+        joins.push(handle);
+        Some(control)
+    } else {
+        None
+    };
+    joins.push(spawn_control_socket_server(
+        state_tx.clone(),
+        Arc::clone(&cancelled),
+        Arc::clone(&timer_store),
+        control_tx,
+        notification_control.clone(),
+    )?);
 
     let mut calendar_sender: Option<Sender<CalendarMonthRequest>> = None;
     match resolve_calendar_script(config_path) {
@@ -327,6 +578,7 @@ fn start_runtime(config: AppConfig, config_path: &Path) -> Result<(UiRuntime, Ru
     let (action_tx, action_handle) =
         spawn_action_worker(router, completion_tx, Arc::clone(&cancelled));
     joins.push(action_handle);
+    let suggestion_engine = SuggestionEngine::load()?;
 
     Ok((
         UiRuntime {
@@ -334,9 +586,10 @@ fn start_runtime(config: AppConfig, config_path: &Path) -> Result<(UiRuntime, Ru
             config_path: config_path.to_path_buf(),
             store,
             activity_tracker,
-            registry: calendar_sender.map_or_else(
-                SurfaceRegistry::default,
-                SurfaceRegistry::with_calendar_sender,
+            registry: SurfaceRegistry::with_services(
+                calendar_sender,
+                suggestion_engine,
+                notification_control.clone(),
             ),
             state_rx,
             completion_rx,
@@ -475,6 +728,7 @@ fn spawn_control_socket_server(
     cancelled: Arc<AtomicBool>,
     timer_store: Arc<Mutex<TimerStore>>,
     control_tx: Sender<UiControlRequest>,
+    notification_control: Option<NotificationControl>,
 ) -> Result<JoinHandle<()>> {
     let socket = ControlSocket::bind()?;
     socket.set_nonblocking(true)?;
@@ -482,7 +736,13 @@ fn spawn_control_socket_server(
     Ok(thread::spawn(move || {
         while !cancelled.load(Ordering::Relaxed) {
             match socket.try_serve_once(|request| {
-                handle_control_request(request, &sender, &timer_store, &control_tx)
+                handle_control_request(
+                    request,
+                    &sender,
+                    &timer_store,
+                    &control_tx,
+                    notification_control.as_ref(),
+                )
             }) {
                 Ok(true) => {}
                 Ok(false) => {
@@ -506,6 +766,7 @@ fn handle_control_request(
     sender: &Sender<StateUpdate>,
     timer_store: &Arc<Mutex<TimerStore>>,
     control_tx: &Sender<UiControlRequest>,
+    notification_control: Option<&NotificationControl>,
 ) -> Result<ControlResponse> {
     match request {
         ControlRequest::TimerStart { .. }
@@ -549,6 +810,36 @@ fn handle_control_request(
                 finished_at,
                 exit_code,
             }));
+            Ok(ControlResponse::Accepted)
+        }
+        ControlRequest::NotificationsGet => {
+            let control = notification_control.context("notification server is disabled")?;
+            Ok(ControlResponse::Notifications {
+                state: control.snapshot()?,
+            })
+        }
+        ControlRequest::NotificationInvoke { id, action_key } => {
+            notification_control
+                .context("notification server is disabled")?
+                .invoke(id, action_key)?;
+            Ok(ControlResponse::Accepted)
+        }
+        ControlRequest::NotificationDismiss { id } => {
+            notification_control
+                .context("notification server is disabled")?
+                .dismiss(id)?;
+            Ok(ControlResponse::Accepted)
+        }
+        ControlRequest::NotificationsClear => {
+            notification_control
+                .context("notification server is disabled")?
+                .clear()?;
+            Ok(ControlResponse::Accepted)
+        }
+        ControlRequest::NotificationsSetDnd { enabled } => {
+            notification_control
+                .context("notification server is disabled")?
+                .set_dnd(enabled)?;
             Ok(ControlResponse::Accepted)
         }
         request @ (ControlRequest::ContextGet { .. }

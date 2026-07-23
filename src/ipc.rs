@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::{ContextAction, ContextSnapshot, DesktopContext, TimerState};
+use crate::{ContextAction, ContextSnapshot, DesktopContext, NotificationState, TimerState};
 
 const TRY_SERVE_READ_TIMEOUT: Duration = Duration::from_millis(50);
 
@@ -50,6 +50,18 @@ pub enum ControlRequest {
         context: DesktopContext,
         output: Option<String>,
     },
+    NotificationsGet,
+    NotificationInvoke {
+        id: u32,
+        action_key: String,
+    },
+    NotificationDismiss {
+        id: u32,
+    },
+    NotificationsClear,
+    NotificationsSetDnd {
+        enabled: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +73,9 @@ pub enum ControlResponse {
     },
     Contexts {
         contexts: Vec<ContextSnapshot>,
+    },
+    Notifications {
+        state: NotificationState,
     },
     ActionResult {
         success: bool,

@@ -6,8 +6,10 @@ pub mod context;
 pub mod integration;
 pub mod ipc;
 pub mod model;
+pub mod notifications;
 pub mod sources;
 pub mod state;
+pub mod suggestions;
 pub mod timers;
 pub mod ui;
 
@@ -26,8 +28,10 @@ pub use compositor::{
     CompositorAction, CompositorAdapter, HyprlandAdapter, NiriAdapter, detect_compositor,
 };
 pub use config::{
-    AppConfig, CommandActivityConfig, CommandRule, FreshnessConfig, ModuleConfig, ModuleName,
-    ReloadStatus, RuntimeConfigReload, ThresholdConfig, reload_runtime_config,
+    AmbientMotion, AppConfig, CommandActivityConfig, CommandRule, ExperienceConfig,
+    FreshnessConfig, ModuleConfig, ModuleName, MotionStyle, NotificationConfig, ReloadStatus,
+    RoutineConfig, RoutineContextDetail, RuntimeConfigReload, ThresholdConfig,
+    reload_runtime_config,
 };
 pub use context::{ContextCard, ContextTier, Dismissals, select_context};
 pub use integration::{context_snapshot, context_snapshots, intent_for_context_action};
@@ -39,10 +43,12 @@ pub use model::{
     CalendarAgenda, CalendarAgendaEvent, CalendarEvent, ClockState, CommandActivity,
     ConnectivityState, ContextAction, ContextActionSpec, ContextHealth, ContextSnapshot,
     DesktopContext, Direction, KeyboardLayoutOption, KeyboardLayoutState, MediaControlAction,
-    MediaState, NetworkState, OutputRole, OutputState, PlaybackStatus, PowerProfile, PowerState,
+    MediaState, NetworkState, Notification, NotificationAction, NotificationState,
+    NotificationUrgency, OutputRole, OutputState, PlaybackStatus, PowerProfile, PowerState,
     ResourceState, SourceHealth, SourceId, StateUpdate, SystemState, SystemUpdate, TimerState,
     WindowState, WorkspaceState,
 };
+pub use notifications::{NotificationCommand, NotificationControl, spawn_notification_server};
 pub use sources::{
     BluetoothCommand, BluetoothControlClient, CalendarMonthRequest, CalendarRecord,
     SourceSupervisor, battery_severity, parse_calendar_agenda_json, parse_calendar_json,
@@ -51,8 +57,9 @@ pub use sources::{
     spawn_network_source, spawn_power_source, spawn_resource_source,
 };
 pub use state::StateStore;
+pub use suggestions::{Suggestion, SuggestionAction, SuggestionEngine, SuggestionSource};
 pub use timers::{TimerRecord, TimerStore};
-pub use ui::BarApplication;
+pub use ui::{BarApplication, run_preview};
 
 pub fn startup(config: &AppConfig) -> Result<()> {
     if let Some(locale) = config.locale.as_deref() {
@@ -92,7 +99,12 @@ pub fn run_test_control_server(requests: usize) -> Result<()> {
             }
             ControlRequest::ContextGet { .. }
             | ControlRequest::ContextExecute { .. }
-            | ControlRequest::ControlCenterOpen { .. } => Ok(ControlResponse::Error {
+            | ControlRequest::ControlCenterOpen { .. }
+            | ControlRequest::NotificationsGet
+            | ControlRequest::NotificationInvoke { .. }
+            | ControlRequest::NotificationDismiss { .. }
+            | ControlRequest::NotificationsClear
+            | ControlRequest::NotificationsSetDnd { .. } => Ok(ControlResponse::Error {
                 message: "desktop integration requires the running bar UI".to_string(),
             }),
         })?;
