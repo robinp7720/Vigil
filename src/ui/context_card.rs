@@ -1,10 +1,45 @@
-use crate::{ActivityStatus, ContextCard, ContextTier};
+use crate::{ActivityStatus, ContextCard, ContextTier, DesktopContext, PlaybackStatus};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextPresentation {
     pub icon_name: String,
     pub text: String,
     pub tier: ContextTier,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContextAction {
+    OpenControlCenter(DesktopContext),
+    FocusWindow { output: String, window_id: String },
+}
+
+pub fn context_action(card: &ContextCard) -> Option<ContextAction> {
+    match card {
+        ContextCard::Battery { .. } => {
+            Some(ContextAction::OpenControlCenter(DesktopContext::Power))
+        }
+        ContextCard::Calendar { .. } | ContextCard::Timer { .. } => {
+            Some(ContextAction::OpenControlCenter(DesktopContext::Clock))
+        }
+        ContextCard::Media { .. } => Some(ContextAction::OpenControlCenter(DesktopContext::Audio)),
+        ContextCard::Activity { .. } => None,
+        ContextCard::Urgent {
+            output,
+            window_id: Some(window_id),
+            ..
+        } => Some(ContextAction::FocusWindow {
+            output: output.clone(),
+            window_id: window_id.clone(),
+        }),
+        ContextCard::Urgent { .. } => None,
+    }
+}
+
+pub fn media_playback_icon(status: &PlaybackStatus) -> &'static str {
+    match status {
+        PlaybackStatus::Playing => "media-playback-pause-symbolic",
+        PlaybackStatus::Paused | PlaybackStatus::Stopped => "media-playback-start-symbolic",
+    }
 }
 
 pub fn context_tier(card: &ContextCard) -> ContextTier {
@@ -156,9 +191,9 @@ fn clock_duration(seconds: u64) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::{ActivityStatus, ContextCard, ContextTier};
+    use crate::{ActivityStatus, ContextCard, ContextTier, DesktopContext, PlaybackStatus};
 
-    use super::context_presentation;
+    use super::{ContextAction, context_action, context_presentation, media_playback_icon};
 
     #[test]
     fn timer_presentation_uses_stable_clock_digits_and_icon() {
@@ -211,5 +246,117 @@ mod tests {
 
         assert_eq!(presentation.icon_name, "system-run-symbolic");
         assert_eq!(presentation.text, "Cargo test · finished");
+    }
+
+    #[test]
+    fn media_playback_icon_reflects_playing_state() {
+        assert_eq!(
+            media_playback_icon(&PlaybackStatus::Playing),
+            "media-playback-pause-symbolic"
+        );
+        assert_eq!(
+            media_playback_icon(&PlaybackStatus::Paused),
+            "media-playback-start-symbolic"
+        );
+        assert_eq!(
+            media_playback_icon(&PlaybackStatus::Stopped),
+            "media-playback-start-symbolic"
+        );
+    }
+
+    #[test]
+    fn battery_card_opens_power_tab() {
+        let action = context_action(&ContextCard::Battery {
+            percent: 20,
+            charging: false,
+            tier: ContextTier::Imminent,
+        });
+        assert_eq!(
+            action,
+            Some(ContextAction::OpenControlCenter(DesktopContext::Power))
+        );
+    }
+
+    #[test]
+    fn calendar_and_timer_cards_open_clock_tab() {
+        let calendar = context_action(&ContextCard::Calendar {
+            id: "event-1".to_string(),
+            title: "Review".to_string(),
+            location: None,
+            start_epoch: 1_800_000_600,
+            tier: ContextTier::Imminent,
+        });
+        let timer = context_action(&ContextCard::Timer {
+            id: "timer-1".to_string(),
+            label: "Tea".to_string(),
+            remaining_seconds: 62,
+            target_epoch: Some(1_800_000_062),
+            completed: false,
+            tier: ContextTier::Imminent,
+        });
+
+        assert_eq!(
+            calendar,
+            Some(ContextAction::OpenControlCenter(DesktopContext::Clock))
+        );
+        assert_eq!(
+            timer,
+            Some(ContextAction::OpenControlCenter(DesktopContext::Clock))
+        );
+    }
+
+    #[test]
+    fn media_card_opens_audio_tab() {
+        let action = context_action(&ContextCard::Media {
+            player: "spotify".to_string(),
+            status: crate::PlaybackStatus::Playing,
+            title: Some("Song".to_string()),
+            artist: None,
+        });
+        assert_eq!(
+            action,
+            Some(ContextAction::OpenControlCenter(DesktopContext::Audio))
+        );
+    }
+
+    #[test]
+    fn activity_card_has_no_click_action() {
+        let action = context_action(&ContextCard::Activity {
+            id: "build-1".to_string(),
+            label: "Cargo test".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+            status: ActivityStatus::Running,
+            started_at: 1_800_000_000,
+            finished_at: None,
+        });
+        assert_eq!(action, None);
+    }
+
+    #[test]
+    fn urgent_card_with_window_focuses_that_window() {
+        let action = context_action(&ContextCard::Urgent {
+            output: "eDP-1".to_string(),
+            workspace: Some("2".to_string()),
+            window_id: Some("42".to_string()),
+            window_title: Some("Terminal".to_string()),
+        });
+        assert_eq!(
+            action,
+            Some(ContextAction::FocusWindow {
+                output: "eDP-1".to_string(),
+                window_id: "42".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn urgent_card_without_window_has_no_click_action() {
+        let action = context_action(&ContextCard::Urgent {
+            output: "eDP-1".to_string(),
+            workspace: None,
+            window_id: None,
+            window_title: None,
+        });
+        assert_eq!(action, None);
     }
 }

@@ -1312,14 +1312,14 @@ impl ControlCenterView {
     ) -> Self {
         let window = gtk::ApplicationWindow::builder()
             .application(application)
-            .title("cockpit-quick-settings")
+            .title("Vigil Quick Settings")
             .build();
         window.set_decorated(false);
         window.set_resizable(false);
         window.set_default_size(512, -1);
         window.add_css_class("control-center-window");
         window.init_layer_shell();
-        window.set_namespace(Some("cockpit-control-center"));
+        window.set_namespace(Some("vigil-control-center"));
         window.set_layer(Layer::Overlay);
         window.set_anchor(Edge::Top, true);
         window.set_anchor(Edge::Right, true);
@@ -1728,6 +1728,7 @@ impl ControlCenterView {
         for volume in [&overview_volume, &detail_volume] {
             install_percent_debounce(
                 &volume.slider.scale,
+                volume.slider.value.clone(),
                 suppress_controls.clone(),
                 volume_handle.clone(),
                 "set-volume",
@@ -1745,6 +1746,7 @@ impl ControlCenterView {
             let device = brightness_device.clone();
             install_percent_debounce(
                 &brightness.scale,
+                brightness.value.clone(),
                 suppress_controls.clone(),
                 brightness_handle.clone(),
                 "set-brightness",
@@ -2906,8 +2908,13 @@ fn connect_toggle_controls<'a, I, F>(
     }
 }
 
+fn live_percent_label(value: f64) -> String {
+    format!("{}%", value.round().clamp(0.0, 100.0) as u8)
+}
+
 fn install_percent_debounce<F>(
     scale: &gtk::Scale,
+    value_label: gtk::Label,
     suppress: Rc<Cell<bool>>,
     handle: ActionHandle,
     action: &'static str,
@@ -2917,6 +2924,7 @@ fn install_percent_debounce<F>(
 {
     let pending = Rc::new(RefCell::new(None::<glib::SourceId>));
     scale.connect_value_changed(move |scale| {
+        value_label.set_label(&live_percent_label(scale.value()));
         if suppress.get() {
             return;
         }
@@ -4309,8 +4317,8 @@ mod tests {
         ControlCenterErrors, ControlCenterFocus, ControlCenterMotionEvent,
         ControlCenterMotionPhase, MetricLevel, SliderDebounce, TimerActionState, TimerControlSpec,
         build_control_center_spec, control_center_origin, events_for_local_day, focus_from_origin,
-        format_network_rate, metric_visual, quick_grid_placements, timer_action_state,
-        volume_icon_name,
+        format_network_rate, live_percent_label, metric_visual, quick_grid_placements,
+        timer_action_state, volume_icon_name,
     };
 
     #[test]
@@ -4337,6 +4345,17 @@ mod tests {
             ControlCenterMotionPhase::Visible.transition(ControlCenterMotionEvent::Exited),
             ControlCenterMotionPhase::Visible
         );
+    }
+
+    #[test]
+    fn live_percent_label_rounds_and_clamps() {
+        assert_eq!(live_percent_label(0.0), "0%");
+        assert_eq!(live_percent_label(49.4), "49%");
+        assert_eq!(live_percent_label(49.5), "50%");
+        assert_eq!(live_percent_label(100.0), "100%");
+        assert_eq!(live_percent_label(100.4), "100%");
+        assert_eq!(live_percent_label(-1.0), "0%");
+        assert_eq!(live_percent_label(150.0), "100%");
     }
 
     #[test]

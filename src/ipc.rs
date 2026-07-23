@@ -80,6 +80,7 @@ pub struct ControlClient {
 pub struct ControlSocket {
     listener: UnixListener,
     socket_path: PathBuf,
+    legacy_socket_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,7 +99,14 @@ enum ExistingPathAction {
 pub fn control_socket_path() -> Result<PathBuf> {
     let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("XDG_RUNTIME_DIR is required for cockpit-bar control socket"))?;
+        .ok_or_else(|| anyhow!("XDG_RUNTIME_DIR is required for Vigil's control socket"))?;
+    Ok(PathBuf::from(runtime_dir).join("vigil.sock"))
+}
+
+fn legacy_control_socket_path() -> Result<PathBuf> {
+    let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("XDG_RUNTIME_DIR is required for Vigil's control socket"))?;
     Ok(PathBuf::from(runtime_dir).join("cockpit-bar.sock"))
 }
 
@@ -132,7 +140,17 @@ impl ControlClient {
 
 impl ControlSocket {
     pub fn bind() -> Result<Self> {
-        Self::bind_at(control_socket_path()?)
+        let mut socket = Self::bind_at(control_socket_path()?)?;
+        let legacy_socket_path = legacy_control_socket_path()?;
+        prepare_socket_path(&legacy_socket_path)?;
+        fs::hard_link(&socket.socket_path, &legacy_socket_path).with_context(|| {
+            format!(
+                "failed to expose legacy control socket {}",
+                legacy_socket_path.display()
+            )
+        })?;
+        socket.legacy_socket_path = Some(legacy_socket_path);
+        Ok(socket)
     }
 
     pub fn bind_at(path: impl AsRef<Path>) -> Result<Self> {
@@ -145,6 +163,7 @@ impl ControlSocket {
         Ok(Self {
             listener,
             socket_path,
+            legacy_socket_path: None,
         })
     }
 
@@ -217,6 +236,15 @@ impl ControlSocket {
         };
         write_json_line(&mut stream, &response).context("failed to write control response")?;
         Ok(true)
+    }
+}
+
+impl Drop for ControlSocket {
+    fn drop(&mut self) {
+        if let Some(path) = &self.legacy_socket_path {
+            let _ = fs::remove_file(path);
+        }
+        let _ = fs::remove_file(&self.socket_path);
     }
 }
 
@@ -382,7 +410,7 @@ mod tests {
         server.join().expect("join server");
 
         assert_eq!(response, ControlResponse::Timers { timers: Vec::new() });
-        assert_eq!(socket_path, runtime_dir.path().join("cockpit-bar.sock"));
+        assert_eq!(socket_path, runtime_dir.path().join("vigil.sock"));
     }
 
     #[test]
@@ -414,8 +442,33 @@ mod tests {
 
         assert_eq!(
             control_socket_path().expect("resolve socket path"),
-            runtime_dir.path().join("cockpit-bar.sock")
+            runtime_dir.path().join("vigil.sock")
         );
+    }
+
+    #[test]
+    fn binding_exposes_legacy_cockpit_socket_until_drop() {
+        let runtime_dir = TempDir::new("ipc-legacy");
+        let _guard = EnvVarGuard::set("XDG_RUNTIME_DIR", runtime_dir.path());
+        let legacy_path = runtime_dir.path().join("cockpit-bar.sock");
+
+        let socket = ControlSocket::bind().expect("bind control socket");
+        let server = thread::spawn(move || {
+            socket
+                .serve_once(|request| {
+                    assert_eq!(request, ControlRequest::TimerList);
+                    Ok(ControlResponse::Timers { timers: Vec::new() })
+                })
+                .expect("serve legacy request");
+        });
+        let legacy_client = ControlClient::with_path(legacy_path.clone());
+        let response = legacy_client
+            .send(&ControlRequest::TimerList)
+            .expect("send through legacy socket");
+
+        server.join().expect("join legacy server");
+        assert_eq!(response, ControlResponse::Timers { timers: Vec::new() });
+        assert!(!legacy_path.exists());
     }
 
     #[test]
@@ -432,7 +485,7 @@ mod tests {
     #[test]
     fn binding_rejects_non_socket_paths_without_deleting_them() {
         let runtime_dir = TempDir::new("ipc-nonsocket");
-        let socket_path = runtime_dir.path().join("cockpit-bar.sock");
+        let socket_path = runtime_dir.path().join("vigil.sock");
         fs::write(&socket_path, "occupied").expect("write regular file");
 
         let error = ControlSocket::bind_at(&socket_path).expect_err("reject regular file");
@@ -486,7 +539,7 @@ mod tests {
     #[test]
     fn try_serve_once_does_not_block_on_stalled_client_without_newline() {
         let runtime_dir = TempDir::new("ipc-stalled-client");
-        let socket_path = runtime_dir.path().join("cockpit-bar.sock");
+        let socket_path = runtime_dir.path().join("vigil.sock");
         let socket = ControlSocket::bind_at(&socket_path).expect("bind socket");
         socket.set_nonblocking(true).expect("set nonblocking");
 
@@ -526,7 +579,7 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .expect("system time")
                 .as_nanos();
-            let path = std::env::temp_dir().join(format!("cockpit-bar-{label}-{unique}"));
+            let path = std::env::temp_dir().join(format!("vigil-{label}-{unique}"));
             fs::create_dir_all(&path).expect("create temp dir");
             Self { path }
         }

@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use cockpit_bar::{
+use vigil::{
     Direction, KeyboardLayoutOption, KeyboardLayoutState, OutputState, StateUpdate, SystemUpdate,
     WindowState, WorkspaceState,
     compositor::{
@@ -47,7 +47,7 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
-    std::env::temp_dir().join(format!("cockpit-bar-{label}-{unique}"))
+    std::env::temp_dir().join(format!("vigil-{label}-{unique}"))
 }
 
 fn write_script(path: &Path, body: &str) {
@@ -758,6 +758,237 @@ fn compositor_hyprland_workspacev2_updates_same_output_activity() {
                     workspace_id: Some("2".to_string()),
                     changed_at: 0,
                 }),
+                urgent: false,
+                changed_at: 0,
+            },
+        ])
+    );
+}
+
+#[test]
+fn compositor_hyprland_createworkspacev2_adds_new_workspace_to_focused_output() {
+    let snapshot = r#"{
+  "monitors": [
+    {
+      "id": 1,
+      "name": "DP-1",
+      "focused": true,
+      "activeWorkspace": { "id": 1, "name": "1" },
+      "specialWorkspace": { "id": 0, "name": "" },
+      "lastWindow": "0x64"
+    },
+    {
+      "id": 2,
+      "name": "DP-2",
+      "focused": false,
+      "activeWorkspace": { "id": 2, "name": "2" },
+      "specialWorkspace": { "id": 0, "name": "" },
+      "lastWindow": "0xc8"
+    }
+  ],
+  "workspaces": [
+    { "id": 1, "name": "1", "monitor": "DP-1" },
+    { "id": 2, "name": "2", "monitor": "DP-2" }
+  ],
+  "clients": [],
+  "devices": { "keyboards": [] }
+}"#;
+    let mut adapter = HyprlandAdapter::new_for_test(
+        snapshot,
+        "createworkspacev2>>4,4\nworkspacev2>>4,4\n",
+        |_, _, _| Ok(()),
+    );
+
+    adapter.initial_snapshot().expect("initial snapshot");
+    adapter
+        .next_update()
+        .expect("workspace create update from createworkspacev2");
+
+    assert_eq!(
+        adapter
+            .next_update()
+            .expect("workspace create update from workspacev2"),
+        StateUpdate::Outputs(vec![
+            OutputState {
+                name: "DP-1".to_string(),
+                workspaces: vec![
+                    WorkspaceState {
+                        id: "1".to_string(),
+                        label: "1".to_string(),
+                        output: "DP-1".to_string(),
+                        active: false,
+                        urgent: false,
+                        changed_at: 0,
+                    },
+                    WorkspaceState {
+                        id: "4".to_string(),
+                        label: "4".to_string(),
+                        output: "DP-1".to_string(),
+                        active: true,
+                        urgent: false,
+                        changed_at: 0,
+                    },
+                ],
+                windows: Vec::new(),
+                focused_window: None,
+                urgent: false,
+                changed_at: 0,
+            },
+            OutputState {
+                name: "DP-2".to_string(),
+                workspaces: vec![WorkspaceState {
+                    id: "2".to_string(),
+                    label: "2".to_string(),
+                    output: "DP-2".to_string(),
+                    active: true,
+                    urgent: false,
+                    changed_at: 0,
+                }],
+                windows: Vec::new(),
+                focused_window: None,
+                urgent: false,
+                changed_at: 0,
+            },
+        ])
+    );
+}
+
+#[test]
+fn compositor_hyprland_destroyworkspacev2_removes_workspace() {
+    let snapshot = r#"{
+  "monitors": [
+    {
+      "id": 1,
+      "name": "DP-1",
+      "focused": true,
+      "activeWorkspace": { "id": 1, "name": "1" },
+      "specialWorkspace": { "id": 0, "name": "" },
+      "lastWindow": "0x64"
+    },
+    {
+      "id": 2,
+      "name": "DP-2",
+      "focused": false,
+      "activeWorkspace": { "id": 2, "name": "2" },
+      "specialWorkspace": { "id": 0, "name": "" },
+      "lastWindow": "0xc8"
+    }
+  ],
+  "workspaces": [
+    { "id": 1, "name": "1", "monitor": "DP-1" },
+    { "id": 3, "name": "3", "monitor": "DP-1" },
+    { "id": 2, "name": "2", "monitor": "DP-2" }
+  ],
+  "clients": [],
+  "devices": { "keyboards": [] }
+}"#;
+    let mut adapter =
+        HyprlandAdapter::new_for_test(snapshot, "destroyworkspacev2>>3,3\n", |_, _, _| Ok(()));
+
+    adapter.initial_snapshot().expect("initial snapshot");
+
+    assert_eq!(
+        adapter.next_update().expect("workspace destroy update"),
+        StateUpdate::Outputs(vec![
+            OutputState {
+                name: "DP-1".to_string(),
+                workspaces: vec![WorkspaceState {
+                    id: "1".to_string(),
+                    label: "1".to_string(),
+                    output: "DP-1".to_string(),
+                    active: true,
+                    urgent: false,
+                    changed_at: 0,
+                }],
+                windows: Vec::new(),
+                focused_window: None,
+                urgent: false,
+                changed_at: 0,
+            },
+            OutputState {
+                name: "DP-2".to_string(),
+                workspaces: vec![WorkspaceState {
+                    id: "2".to_string(),
+                    label: "2".to_string(),
+                    output: "DP-2".to_string(),
+                    active: true,
+                    urgent: false,
+                    changed_at: 0,
+                }],
+                windows: Vec::new(),
+                focused_window: None,
+                urgent: false,
+                changed_at: 0,
+            },
+        ])
+    );
+}
+
+#[test]
+fn compositor_niri_workspaces_changed_adds_and_removes_workspaces() {
+    let outputs = r#"[
+        { "name": "DP-1", "is_focused": true },
+        { "name": "DP-2", "is_focused": false }
+    ]"#;
+    let workspaces = r#"[
+        { "id": 1, "idx": 1, "name": null, "output": "DP-1", "is_urgent": false, "is_active": true, "is_focused": true, "active_window_id": null },
+        { "id": 2, "idx": 1, "name": null, "output": "DP-2", "is_urgent": false, "is_active": true, "is_focused": false, "active_window_id": null }
+    ]"#;
+    let windows = "[]";
+    let keyboard_layouts = r#"{ "names": ["English (US)"], "current_idx": 0 }"#;
+    let events = "{\"WorkspacesChanged\":{\"workspaces\":[{\"id\":1,\"idx\":1,\"name\":null,\"output\":\"DP-1\",\"is_urgent\":false,\"is_active\":false,\"is_focused\":false,\"active_window_id\":null},{\"id\":3,\"idx\":2,\"name\":null,\"output\":\"DP-1\",\"is_urgent\":false,\"is_active\":true,\"is_focused\":true,\"active_window_id\":null},{\"id\":2,\"idx\":1,\"name\":null,\"output\":\"DP-2\",\"is_urgent\":false,\"is_active\":true,\"is_focused\":false,\"active_window_id\":null}]}}\n";
+
+    let mut adapter = NiriAdapter::new_for_test(
+        outputs,
+        workspaces,
+        windows,
+        keyboard_layouts,
+        events,
+        |_, _, _| Ok(()),
+    );
+
+    adapter.initial_snapshot().expect("initial snapshot");
+
+    assert_eq!(
+        adapter.next_update().expect("workspaces changed update"),
+        StateUpdate::Outputs(vec![
+            OutputState {
+                name: "DP-1".to_string(),
+                workspaces: vec![
+                    WorkspaceState {
+                        id: "1".to_string(),
+                        label: "1".to_string(),
+                        output: "DP-1".to_string(),
+                        active: false,
+                        urgent: false,
+                        changed_at: 0,
+                    },
+                    WorkspaceState {
+                        id: "3".to_string(),
+                        label: "2".to_string(),
+                        output: "DP-1".to_string(),
+                        active: true,
+                        urgent: false,
+                        changed_at: 0,
+                    },
+                ],
+                windows: Vec::new(),
+                focused_window: None,
+                urgent: false,
+                changed_at: 0,
+            },
+            OutputState {
+                name: "DP-2".to_string(),
+                workspaces: vec![WorkspaceState {
+                    id: "2".to_string(),
+                    label: "1".to_string(),
+                    output: "DP-2".to_string(),
+                    active: true,
+                    urgent: false,
+                    changed_at: 0,
+                }],
+                windows: Vec::new(),
+                focused_window: None,
                 urgent: false,
                 changed_at: 0,
             },

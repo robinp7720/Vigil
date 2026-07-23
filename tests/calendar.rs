@@ -7,7 +7,7 @@ use std::sync::{
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use cockpit_bar::{
+use vigil::{
     CalendarAgenda, CalendarAgendaEvent, CalendarEvent, CalendarMonthRequest, FreshnessConfig,
     SourceHealth, SourceId, StateStore, StateUpdate, SystemUpdate, parse_calendar_agenda_json,
     parse_calendar_json, spawn_calendar_agenda_source, spawn_calendar_source,
@@ -18,7 +18,7 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
-    std::env::temp_dir().join(format!("cockpit-bar-{label}-{unique}"))
+    std::env::temp_dir().join(format!("vigil-{label}-{unique}"))
 }
 
 fn write_script(path: &Path, body: &str) {

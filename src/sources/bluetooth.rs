@@ -32,7 +32,7 @@ const BLUEZ_AGENT_INTERFACE: &str = "org.bluez.AgentManager1";
 const BLUEZ_ADAPTER_INTERFACE: &str = "org.bluez.Adapter1";
 const BLUEZ_DEVICE_INTERFACE: &str = "org.bluez.Device1";
 const BLUEZ_BATTERY_INTERFACE: &str = "org.bluez.Battery1";
-const BAR_AGENT_PATH: &str = "/org/cockpit_bar/BluetoothAgent";
+const BAR_AGENT_PATH: &str = "/me/robindecker/Vigil/BluetoothAgent";
 const BLUETOOTH_RESTART_DELAY: Duration = Duration::from_secs(1);
 const CONTROLLER_POLL: Duration = Duration::from_millis(80);
 const PAIRING_TIMEOUT: Duration = Duration::from_secs(60);
@@ -321,7 +321,7 @@ impl PairingAgent {
             Ok(())
         } else {
             Err(AgentError::Rejected(
-                "No pairing initiated by cockpit-bar is active".to_string(),
+                "No pairing initiated by Vigil is active".to_string(),
             ))
         }
     }

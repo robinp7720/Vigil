@@ -80,7 +80,7 @@ impl BarApplication {
         install_sighup_handler()?;
         let (ui_runtime, runtime) = start_runtime(config, config_path)?;
         let application = gtk::Application::builder()
-            .application_id("dev.robin.cockpit-bar")
+            .application_id("me.robindecker.Vigil")
             .build();
 
         let ui_runtime = Rc::new(RefCell::new(Some(ui_runtime)));
@@ -169,6 +169,7 @@ fn install_ui_loop(
             );
             dirty |= prune_completed_activities(&mut runtime, now_epoch);
             dirty |= runtime.store.expire(now_epoch);
+            dirty |= runtime.registry.take_context_dirty();
             drain_control_requests(&mut runtime);
 
             if dirty || monitor_dirty.replace(false) {
@@ -820,9 +821,9 @@ mod tests {
         fs::create_dir_all(&config_home).unwrap();
         fs::write(bar.join("config.toml"), "").unwrap();
         fs::write(scripts.join("next_event.sh"), "#!/usr/bin/env bash\n").unwrap();
-        std::os::unix::fs::symlink(&bar, config_home.join("cockpit-bar")).unwrap();
+        std::os::unix::fs::symlink(&bar, config_home.join("vigil")).unwrap();
 
-        let resolved = resolve_calendar_script(&config_home.join("cockpit-bar/config.toml"))
+        let resolved = resolve_calendar_script(&config_home.join("vigil/config.toml"))
             .expect("calendar helper");
 
         assert_eq!(
@@ -859,6 +860,6 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
-        std::env::temp_dir().join(format!("cockpit-bar-{label}-{unique}"))
+        std::env::temp_dir().join(format!("vigil-{label}-{unique}"))
     }
 }

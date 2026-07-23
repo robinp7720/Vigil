@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
@@ -17,7 +17,10 @@ use crate::{
     OutputRole, WorkspaceState, select_context,
 };
 
-use super::context_card::{context_presentation, context_tier, warning_text};
+use super::context_card::{
+    ContextAction, context_action, context_presentation, context_tier, media_playback_icon,
+    warning_text,
+};
 use super::control_center::{ControlCenterFocus, ControlCenterView};
 use super::popovers::PopoverCoordinator;
 use super::system::{SystemButtonSpec, SystemCluster, SystemModuleId, build_system_cluster};
@@ -63,6 +66,8 @@ pub struct ContextSpec {
     pub icon_name: String,
     pub text: String,
     pub tier: ContextTier,
+    pub now_epoch: i64,
+    pub critical_snooze_seconds: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,19 +109,18 @@ impl RenderPlan {
     }
 }
 
-pub fn surface_specs(snapshot: &BarSnapshot, config: &AppConfig) -> Vec<SurfaceSpec> {
+pub fn surface_specs(
+    snapshot: &BarSnapshot,
+    config: &AppConfig,
+    dismissals: &Dismissals,
+) -> Vec<SurfaceSpec> {
     let Some(primary_output) = select_primary_output(snapshot, config) else {
         return Vec::new();
     };
 
     let groups = window_groups(snapshot);
     let now_epoch = snapshot.system.clock.epoch_seconds;
-    let selected_context = select_context(
-        snapshot,
-        now_epoch,
-        &config.thresholds,
-        &Dismissals::default(),
-    );
+    let selected_context = select_context(snapshot, now_epoch, &config.thresholds, dismissals);
     let primary_context = selected_context.as_ref().map(|card| {
         let presentation = context_presentation(card, now_epoch);
         ContextSpec {
@@ -124,6 +128,8 @@ pub fn surface_specs(snapshot: &BarSnapshot, config: &AppConfig) -> Vec<SurfaceS
             icon_name: presentation.icon_name,
             text: presentation.text,
             tier: presentation.tier,
+            now_epoch,
+            critical_snooze_seconds: config.thresholds.critical_snooze_seconds,
         }
     });
     let reduced_warning = selected_context
@@ -242,6 +248,8 @@ type PopoverRegistry = Rc<RefCell<BTreeMap<String, ManagedOverlay>>>;
 pub struct SurfaceRegistry {
     surfaces: BTreeMap<String, SurfaceHandle>,
     calendar_sender: Option<Sender<CalendarMonthRequest>>,
+    dismissals: Rc<RefCell<Dismissals>>,
+    context_dirty: Rc<Cell<bool>>,
 }
 
 impl Default for SurfaceRegistry {
@@ -255,6 +263,8 @@ impl SurfaceRegistry {
         Self {
             surfaces: BTreeMap::new(),
             calendar_sender: None,
+            dismissals: Rc::new(RefCell::new(Dismissals::default())),
+            context_dirty: Rc::new(Cell::new(false)),
         }
     }
 
@@ -262,7 +272,13 @@ impl SurfaceRegistry {
         Self {
             surfaces: BTreeMap::new(),
             calendar_sender: Some(sender),
+            dismissals: Rc::new(RefCell::new(Dismissals::default())),
+            context_dirty: Rc::new(Cell::new(false)),
         }
+    }
+
+    pub fn take_context_dirty(&self) -> bool {
+        self.context_dirty.replace(false)
     }
 
     pub fn reconcile(
@@ -272,7 +288,7 @@ impl SurfaceRegistry {
         config: &AppConfig,
         action_sender: &Sender<ActionRequest>,
     ) {
-        let desired_specs = surface_specs(snapshot, config);
+        let desired_specs = surface_specs(snapshot, config, &self.dismissals.borrow());
         let Some(display) = gdk::Display::default() else {
             return;
         };
@@ -319,6 +335,8 @@ impl SurfaceRegistry {
                         &spec,
                         action_sender.clone(),
                         self.calendar_sender.clone(),
+                        self.dismissals.clone(),
+                        self.context_dirty.clone(),
                     );
                     self.surfaces.insert(spec.output_name.clone(), surface);
                 }
@@ -386,6 +404,8 @@ impl SurfaceHandle {
         spec: &SurfaceSpec,
         action_sender: Sender<ActionRequest>,
         calendar_sender: Option<Sender<CalendarMonthRequest>>,
+        dismissals: Rc<RefCell<Dismissals>>,
+        context_dirty: Rc<Cell<bool>>,
     ) -> Self {
         match spec.role {
             OutputRole::Primary => Self::Primary(PrimarySurface::new(
@@ -394,6 +414,8 @@ impl SurfaceHandle {
                 spec,
                 action_sender,
                 calendar_sender,
+                dismissals,
+                context_dirty,
             )),
             OutputRole::Reduced => Self::Reduced(ReducedSurface::new(
                 application,
@@ -443,6 +465,9 @@ pub struct PrimarySurface {
     context_row: gtk::Box,
     context_icon: gtk::Image,
     context_label: gtk::Label,
+    context_media_controls: gtk::Box,
+    context_media_play: gtk::Button,
+    current_context: Rc<RefCell<Option<ContextSpec>>>,
     system_items: gtk::Box,
     status_buttons: BTreeMap<SystemModuleId, StatusButtonView>,
     status_button_order: Vec<SystemModuleId>,
@@ -460,6 +485,8 @@ impl PrimarySurface {
         spec: &SurfaceSpec,
         action_sender: Sender<ActionRequest>,
         calendar_sender: Option<Sender<CalendarMonthRequest>>,
+        dismissals: Rc<RefCell<Dismissals>>,
+        context_dirty: Rc<Cell<bool>>,
     ) -> Self {
         let window = base_window(application, monitor);
         window.add_css_class("bar-window");
@@ -551,6 +578,18 @@ impl PrimarySurface {
         context_label.set_ellipsize(EllipsizeMode::End);
         context_row.append(&context_icon);
         context_row.append(&context_label);
+        context_row.set_tooltip_text(Some("Click to open · Right-click to dismiss"));
+        let context_media_controls = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        context_media_controls.add_css_class("context-media-controls");
+        context_media_controls.set_visible(false);
+        let context_media_previous = icon_button("media-skip-backward-symbolic", "Previous track");
+        let context_media_play = icon_button("media-playback-start-symbolic", "Play or pause");
+        let context_media_next = icon_button("media-skip-forward-symbolic", "Next track");
+        context_media_controls.append(&context_media_previous);
+        context_media_controls.append(&context_media_play);
+        context_media_controls.append(&context_media_next);
+        context_row.append(&context_media_controls);
+        let current_context = Rc::new(RefCell::new(None::<ContextSpec>));
         context_stack.add_named(&title_button, Some("title"));
         context_stack.add_named(&context_row, Some("context"));
         context_stack.set_visible_child_name("title");
@@ -582,6 +621,34 @@ impl PrimarySurface {
             popover_coordinator.clone(),
             popover_registry.clone(),
         );
+        install_context_interactions(
+            &context_row,
+            current_context.clone(),
+            dismissals,
+            context_dirty,
+            action_sender.clone(),
+            spec.output_name.clone(),
+            control_center.clone(),
+            popover_coordinator.clone(),
+            popover_registry.clone(),
+        );
+        for (button, action) in [
+            (&context_media_previous, MediaControlAction::Previous),
+            (&context_media_play, MediaControlAction::PlayPause),
+            (&context_media_next, MediaControlAction::Next),
+        ] {
+            let control_center = control_center.clone();
+            let action_sender = action_sender.clone();
+            button.connect_clicked(move |_| {
+                let Some(player) = control_center.media_player() else {
+                    return;
+                };
+                let _ = action_sender.send(ActionRequest {
+                    origin: "context-media".to_string(),
+                    intent: ActionIntent::ControlMedia { player, action },
+                });
+            });
+        }
         let mut status_buttons = BTreeMap::new();
         for module in initial_system.modules() {
             let status_button = build_status_button(
@@ -622,6 +689,9 @@ impl PrimarySurface {
             context_row,
             context_icon,
             context_label,
+            context_media_controls,
+            context_media_play,
+            current_context,
             system_items,
             status_buttons,
             status_button_order,
@@ -661,16 +731,25 @@ impl PrimarySurface {
         }
 
         if plan.context {
+            *self.current_context.borrow_mut() = spec.context.clone();
             if let Some(context) = spec.context.as_ref() {
                 self.context_icon.set_icon_name(Some(&context.icon_name));
                 self.context_label.set_label(&context.text);
                 apply_tier_classes(&self.context_row, context.tier);
                 self.context_stack.set_visible_child_name("context");
+                if let ContextCard::Media { status, .. } = &context.card {
+                    self.context_media_play
+                        .set_icon_name(media_playback_icon(status));
+                    self.context_media_controls.set_visible(true);
+                } else {
+                    self.context_media_controls.set_visible(false);
+                }
             } else {
                 self.context_icon.set_icon_name(None);
                 self.context_label.set_label("");
                 clear_tier_classes(&self.context_row);
                 self.context_stack.set_visible_child_name("title");
+                self.context_media_controls.set_visible(false);
             }
         }
 
@@ -888,13 +967,13 @@ fn base_window(application: &gtk::Application, monitor: &gdk::Monitor) -> gtk::A
     let width = bar_window_width_for_monitor_width(monitor.geometry().width());
     let window = gtk::ApplicationWindow::builder()
         .application(application)
-        .title("cockpit-bar")
+        .title("Vigil")
         .build();
     window.set_decorated(false);
     window.set_resizable(false);
     window.set_default_size(width, BAR_HEIGHT);
     window.init_layer_shell();
-    window.set_namespace(Some("cockpit-bar"));
+    window.set_namespace(Some("vigil"));
     window.set_layer(Layer::Top);
     window.set_anchor(Edge::Top, true);
     window.set_anchor(Edge::Left, true);
@@ -1016,6 +1095,69 @@ fn install_title_interactions(
         });
     });
     button.add_controller(secondary);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn install_context_interactions(
+    context_row: &gtk::Box,
+    current_context: Rc<RefCell<Option<ContextSpec>>>,
+    dismissals: Rc<RefCell<Dismissals>>,
+    context_dirty: Rc<Cell<bool>>,
+    action_sender: Sender<ActionRequest>,
+    output_name: String,
+    control_center: Rc<ControlCenterView>,
+    coordinator: Rc<RefCell<PopoverCoordinator>>,
+    registry: PopoverRegistry,
+) {
+    let primary = gtk::GestureClick::new();
+    primary.set_button(1);
+    let context_for_primary = current_context.clone();
+    primary.connect_pressed(move |_, _, _, _| {
+        let Some(context) = context_for_primary.borrow().clone() else {
+            return;
+        };
+        match context_action(&context.card) {
+            Some(ContextAction::OpenControlCenter(desktop_context)) => {
+                control_center.show_page(desktop_context.into());
+                show_managed_window(
+                    "control-center",
+                    control_center.clone(),
+                    coordinator.clone(),
+                    registry.clone(),
+                );
+            }
+            Some(ContextAction::FocusWindow { output, window_id }) => {
+                let _ = action_sender.send(ActionRequest {
+                    origin: format!("context-click:{output_name}"),
+                    intent: ActionIntent::FocusWindow { output, window_id },
+                });
+            }
+            None => {}
+        }
+    });
+    context_row.add_controller(primary);
+
+    let secondary = gtk::GestureClick::new();
+    secondary.set_button(3);
+    secondary.connect_pressed(move |_, _, _, _| {
+        let Some(context) = current_context.borrow().clone() else {
+            return;
+        };
+        dismissals.borrow_mut().dismiss(
+            &context.card,
+            context.now_epoch,
+            context.critical_snooze_seconds,
+        );
+        context_dirty.set(true);
+    });
+    context_row.add_controller(secondary);
+}
+
+fn icon_button(icon_name: &str, tooltip: &str) -> gtk::Button {
+    let button = gtk::Button::from_icon_name(icon_name);
+    button.set_tooltip_text(Some(tooltip));
+    button.set_has_frame(false);
+    button
 }
 
 fn rebuild_window_popover(
@@ -1189,6 +1331,7 @@ fn control_focus(module_id: SystemModuleId) -> ControlCenterFocus {
         SystemModuleId::Keyboard => ControlCenterFocus::Keyboard,
         SystemModuleId::Resources => ControlCenterFocus::Resources,
         SystemModuleId::Network => ControlCenterFocus::Network,
+        SystemModuleId::Bluetooth => ControlCenterFocus::Bluetooth,
         SystemModuleId::Audio => ControlCenterFocus::Audio,
         SystemModuleId::Power => ControlCenterFocus::Power,
         SystemModuleId::Clock => ControlCenterFocus::Clock,
@@ -1379,6 +1522,7 @@ fn scroll_actions(module_id: SystemModuleId) -> Option<(ActionIntent, ActionInte
             ActionIntent::ToggleKeyboardLayout,
         )),
         SystemModuleId::Audio => None,
+        SystemModuleId::Bluetooth => None,
         SystemModuleId::Power => Some((
             ActionIntent::CyclePowerProfile {
                 direction: Direction::Previous,
@@ -1396,8 +1540,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::{
-        AppConfig, BarSnapshot, ClockState, OutputRole, OutputState, PowerProfile, PowerState,
-        WindowState, WorkspaceState, reload_runtime_config,
+        AppConfig, BarSnapshot, ClockState, Dismissals, OutputRole, OutputState, PowerProfile,
+        PowerState, WindowState, WorkspaceState, reload_runtime_config,
     };
 
     use super::{RenderPlan, SurfaceSpec, surface_specs};
@@ -1425,7 +1569,7 @@ mod tests {
             ),
         ]);
 
-        let specs = surface_specs(&snapshot, &AppConfig::default());
+        let specs = surface_specs(&snapshot, &AppConfig::default(), &Dismissals::default());
 
         assert_eq!(
             specs
@@ -1457,7 +1601,7 @@ mod tests {
             ),
         ]);
 
-        let specs = surface_specs(&snapshot, &AppConfig::default());
+        let specs = surface_specs(&snapshot, &AppConfig::default(), &Dismissals::default());
 
         assert_eq!(specs[0].output_name, "DP-4");
         assert_eq!(specs[0].role, OutputRole::Primary);
@@ -1501,11 +1645,16 @@ mod tests {
         ]);
 
         assert_eq!(
-            surface_specs(&without_primary, &AppConfig::default())[0].output_name,
+            surface_specs(
+                &without_primary,
+                &AppConfig::default(),
+                &Dismissals::default()
+            )[0]
+            .output_name,
             "DP-4"
         );
         assert_eq!(
-            surface_specs(&restored, &AppConfig::default())[0].output_name,
+            surface_specs(&restored, &AppConfig::default(), &Dismissals::default())[0].output_name,
             "DP-5"
         );
     }
@@ -1531,7 +1680,7 @@ mod tests {
         next.primary_output = Some("DP-4".to_string());
 
         let reloaded = reload_runtime_config(&current, next);
-        let specs = surface_specs(&snapshot, &reloaded.config);
+        let specs = surface_specs(&snapshot, &reloaded.config, &Dismissals::default());
 
         assert_eq!(specs[0].output_name, "DP-4");
         assert_eq!(specs[0].role, OutputRole::Primary);
@@ -1557,7 +1706,7 @@ mod tests {
             ),
         ]);
 
-        let specs = surface_specs(&snapshot, &AppConfig::default());
+        let specs = surface_specs(&snapshot, &AppConfig::default(), &Dismissals::default());
         let reduced = specs
             .iter()
             .find(|spec| spec.output_name == "DP-4")
@@ -1594,7 +1743,7 @@ mod tests {
             ),
         ]);
 
-        let specs = surface_specs(&snapshot, &AppConfig::default());
+        let specs = surface_specs(&snapshot, &AppConfig::default(), &Dismissals::default());
         let primary = specs
             .iter()
             .find(|spec| spec.output_name == "DP-5")
@@ -1625,7 +1774,7 @@ mod tests {
             ),
         ]);
 
-        let specs = surface_specs(&snapshot, &AppConfig::default());
+        let specs = surface_specs(&snapshot, &AppConfig::default(), &Dismissals::default());
         let reduced = specs
             .iter()
             .find(|spec| spec.output_name == "DP-4")
@@ -1658,7 +1807,7 @@ mod tests {
             changed_at: 0,
         };
 
-        let specs = surface_specs(&snapshot, &AppConfig::default());
+        let specs = surface_specs(&snapshot, &AppConfig::default(), &Dismissals::default());
         let reduced = specs
             .iter()
             .find(|spec| spec.output_name == "DP-4")
@@ -1675,6 +1824,45 @@ mod tests {
                 .map(|warning| warning.text.as_str()),
             Some("Battery 6%")
         );
+    }
+
+    #[test]
+    fn surface_specs_hides_dismissed_context_card() {
+        let mut snapshot = snapshot([output(
+            "DP-4",
+            &[workspace("1", "1", "DP-4", true, false)],
+            Some(window("notes", "Notes")),
+            false,
+        )]);
+        snapshot.system.power = PowerState {
+            battery_present: true,
+            battery_percent: Some(6),
+            charging: false,
+            profile: PowerProfile::Balanced,
+            changed_at: 0,
+        };
+
+        let specs = surface_specs(&snapshot, &AppConfig::default(), &Dismissals::default());
+        let primary = specs
+            .iter()
+            .find(|spec| spec.output_name == "DP-4")
+            .expect("primary output spec");
+        let context = primary.context.as_ref().expect("battery context card");
+
+        let mut dismissals = Dismissals::default();
+        dismissals.dismiss(
+            &context.card,
+            context.now_epoch,
+            context.critical_snooze_seconds,
+        );
+
+        let specs = surface_specs(&snapshot, &AppConfig::default(), &dismissals);
+        let primary = specs
+            .iter()
+            .find(|spec| spec.output_name == "DP-4")
+            .expect("primary output spec");
+
+        assert!(primary.context.is_none());
     }
 
     #[test]

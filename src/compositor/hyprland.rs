@@ -522,6 +522,36 @@ fn apply_event(
                 layout_index_for_name(&state.keyboard_layout, layout);
             state.keyboard_layout.current_name = Some(layout.to_string());
         }
+        "createworkspacev2" => {
+            let mut parts = payload.splitn(2, ',');
+            let workspace_id = parts
+                .next()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| reconnect_error("createworkspacev2 missing workspace id"))?;
+            let name = parts
+                .next()
+                .filter(|value| !value.is_empty())
+                .unwrap_or(workspace_id);
+            let output = state.focused_output.clone().unwrap_or_default();
+            state.workspaces.insert(
+                workspace_id.to_string(),
+                super::RawWorkspace {
+                    id: workspace_id.to_string(),
+                    label: name.to_string(),
+                    output,
+                    active: false,
+                    urgent_hint: false,
+                },
+            );
+        }
+        "destroyworkspacev2" => {
+            let workspace_id = payload
+                .split(',')
+                .next()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| reconnect_error("destroyworkspacev2 missing workspace id"))?;
+            state.workspaces.remove(workspace_id);
+        }
         "workspacev2" => {
             let mut parts = payload.splitn(2, ',');
             let workspace_id = parts

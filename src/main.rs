@@ -7,8 +7,8 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
-#[command(name = "cockpit-bar")]
-#[command(about = "Wayland command cockpit bar")]
+#[command(name = "vigil")]
+#[command(about = "Vigil, a Wayland-native desktop cockpit")]
 struct Cli {
     #[arg(long, value_name = "PATH", default_value_os_t = default_config_path())]
     config: PathBuf,
@@ -74,7 +74,7 @@ enum ActivityCommand {
 fn default_config_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("cockpit-bar")
+        .join("vigil")
         .join("config.toml")
 }
 
@@ -97,45 +97,40 @@ fn main() -> ExitCode {
 
 fn run_cli(cli: Cli) -> Result<()> {
     match cli.command {
-        None => cockpit_bar::run(&cli.config),
+        None => vigil::run(&cli.config),
         Some(Command::Timer { command }) => {
             let request = timer_request(command)?;
-            let response = cockpit_bar::ControlClient::new()?.send(&request)?;
+            let response = vigil::ControlClient::new()?.send(&request)?;
             handle_control_response(response)
         }
         Some(Command::Activity { command }) => handle_activity_command(command, &cli.config),
-        Some(Command::TestControlServer { requests }) => {
-            cockpit_bar::run_test_control_server(requests)
-        }
+        Some(Command::TestControlServer { requests }) => vigil::run_test_control_server(requests),
     }
 }
 
-fn timer_request(command: TimerCommand) -> Result<cockpit_bar::ControlRequest> {
+fn timer_request(command: TimerCommand) -> Result<vigil::ControlRequest> {
     Ok(match command {
-        TimerCommand::Start { duration, label } => cockpit_bar::ControlRequest::TimerStart {
+        TimerCommand::Start { duration, label } => vigil::ControlRequest::TimerStart {
             label,
             duration_seconds: parse_duration_seconds(&duration)?,
         },
-        TimerCommand::Pause { id } => cockpit_bar::ControlRequest::TimerPause { id },
-        TimerCommand::Resume { id } => cockpit_bar::ControlRequest::TimerResume { id },
-        TimerCommand::Cancel { id } => cockpit_bar::ControlRequest::TimerCancel { id },
-        TimerCommand::List => cockpit_bar::ControlRequest::TimerList,
+        TimerCommand::Pause { id } => vigil::ControlRequest::TimerPause { id },
+        TimerCommand::Resume { id } => vigil::ControlRequest::TimerResume { id },
+        TimerCommand::Cancel { id } => vigil::ControlRequest::TimerCancel { id },
+        TimerCommand::List => vigil::ControlRequest::TimerList,
     })
 }
 
-fn activity_request(
-    command: ActivityCommand,
-    now_epoch: i64,
-) -> Result<cockpit_bar::ControlRequest> {
+fn activity_request(command: ActivityCommand, now_epoch: i64) -> Result<vigil::ControlRequest> {
     Ok(match command {
         ActivityCommand::ShellRules => bail!("shell-rules does not produce a control request"),
-        ActivityCommand::Start { id, label, cwd } => cockpit_bar::ControlRequest::ActivityStart {
+        ActivityCommand::Start { id, label, cwd } => vigil::ControlRequest::ActivityStart {
             id,
             label,
             cwd,
             started_at: now_epoch,
         },
-        ActivityCommand::Finish { id, exit_code } => cockpit_bar::ControlRequest::ActivityFinish {
+        ActivityCommand::Finish { id, exit_code } => vigil::ControlRequest::ActivityFinish {
             id,
             exit_code,
             finished_at: now_epoch,
@@ -148,20 +143,20 @@ fn handle_activity_command(command: ActivityCommand, config_path: &Path) -> Resu
         ActivityCommand::ShellRules => print_activity_shell_rules(config_path),
         other => {
             let request = activity_request(other, current_epoch())?;
-            let response = cockpit_bar::ControlClient::new()?.send(&request)?;
+            let response = vigil::ControlClient::new()?.send(&request)?;
             handle_control_response(response)
         }
     }
 }
 
 fn print_activity_shell_rules(config_path: &Path) -> Result<()> {
-    let config = cockpit_bar::AppConfig::load(config_path)?;
+    let config = vigil::AppConfig::load(config_path)?;
     let payload = encode_activity_shell_rules(&config.command_activity.allowlist)?;
     std::io::stdout().write_all(&payload)?;
     Ok(())
 }
 
-fn encode_activity_shell_rules(allowlist: &[cockpit_bar::CommandRule]) -> Result<Vec<u8>> {
+fn encode_activity_shell_rules(allowlist: &[vigil::CommandRule]) -> Result<Vec<u8>> {
     let mut payload = Vec::new();
 
     for rule in allowlist {
@@ -186,9 +181,9 @@ fn validate_activity_shell_rule_field(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn handle_control_response(response: cockpit_bar::ControlResponse) -> Result<()> {
+fn handle_control_response(response: vigil::ControlResponse) -> Result<()> {
     match response {
-        cockpit_bar::ControlResponse::Error { message } => Err(anyhow!(message)),
+        vigil::ControlResponse::Error { message } => Err(anyhow!(message)),
         other => {
             println!("{}", serde_json::to_string(&other)?);
             Ok(())
@@ -254,7 +249,7 @@ mod tests {
 
         assert_eq!(
             request,
-            cockpit_bar::ControlRequest::ActivityStart {
+            vigil::ControlRequest::ActivityStart {
                 id: "shell-1".to_string(),
                 label: "Cargo test".to_string(),
                 cwd: PathBuf::from("/tmp/project"),
@@ -276,7 +271,7 @@ mod tests {
 
         assert_eq!(
             request,
-            cockpit_bar::ControlRequest::ActivityFinish {
+            vigil::ControlRequest::ActivityFinish {
                 id: "shell-1".to_string(),
                 exit_code: 23,
                 finished_at: 1_800_000_001,
@@ -286,7 +281,7 @@ mod tests {
 
     #[test]
     fn activity_shell_rules_encode_non_default_configured_allowlist() {
-        let config = cockpit_bar::AppConfig::from_toml(
+        let config = vigil::AppConfig::from_toml(
             r#"
             [[command_activity.allowlist]]
             label = "Cargo nextest"

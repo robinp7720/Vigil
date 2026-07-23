@@ -31,20 +31,33 @@ pub struct TimerStore {
 impl TimerStore {
     pub fn load(now_epoch: i64) -> Result<Self> {
         let state_path = timer_state_path()?;
-        Self::load_at(state_path, now_epoch)
+        let legacy_state_path = legacy_timer_state_path()?;
+        Self::load_at_with_fallback(state_path, Some(legacy_state_path), now_epoch)
     }
 
-    fn load_at(state_path: PathBuf, now_epoch: i64) -> Result<Self> {
-        let records = match fs::read_to_string(&state_path) {
+    fn load_at_with_fallback(
+        state_path: PathBuf,
+        fallback_path: Option<PathBuf>,
+        now_epoch: i64,
+    ) -> Result<Self> {
+        let source_path = if state_path.exists() {
+            state_path.clone()
+        } else {
+            fallback_path
+                .filter(|path| path.exists())
+                .unwrap_or_else(|| state_path.clone())
+        };
+        let migrated = source_path != state_path;
+        let records = match fs::read_to_string(&source_path) {
             Ok(contents) => {
                 serde_json::from_str::<PersistedTimers>(&contents)
-                    .with_context(|| format!("failed to parse {}", state_path.display()))?
+                    .with_context(|| format!("failed to parse {}", source_path.display()))?
                     .timers
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => {
                 return Err(error)
-                    .with_context(|| format!("failed to read {}", state_path.display()));
+                    .with_context(|| format!("failed to read {}", source_path.display()));
             }
         };
 
@@ -52,7 +65,8 @@ impl TimerStore {
             state_path,
             records,
         };
-        if store.refresh_completed(now_epoch)? {
+        let timers_changed = store.refresh_completed(now_epoch)?;
+        if migrated || timers_changed {
             store.persist()?;
         }
         Ok(store)
@@ -201,7 +215,13 @@ impl TimerStore {
 
 fn timer_state_path() -> Result<PathBuf> {
     let state_root = dirs::state_dir()
-        .ok_or_else(|| anyhow!("failed to resolve XDG state directory for cockpit-bar"))?;
+        .ok_or_else(|| anyhow!("failed to resolve XDG state directory for Vigil"))?;
+    Ok(state_root.join("vigil").join("timers.json"))
+}
+
+fn legacy_timer_state_path() -> Result<PathBuf> {
+    let state_root = dirs::state_dir()
+        .ok_or_else(|| anyhow!("failed to resolve XDG state directory for Vigil"))?;
     Ok(state_root.join("cockpit-bar").join("timers.json"))
 }
 
@@ -316,10 +336,29 @@ mod tests {
         assert_eq!(completed[0].target_epoch, Some(start_epoch + 30 * 60));
         assert!(completed[0].completed);
 
-        let persisted =
-            fs::read_to_string(state_home.path().join("cockpit-bar").join("timers.json"))
-                .expect("read persisted timers");
+        let persisted = fs::read_to_string(state_home.path().join("vigil").join("timers.json"))
+            .expect("read persisted timers");
         assert!(persisted.contains("\"completed\":true"));
+    }
+
+    #[test]
+    fn load_migrates_legacy_cockpit_timer_state() {
+        let state_home = TempDir::new("timers-legacy");
+        let _guard = EnvVarGuard::set("XDG_STATE_HOME", state_home.path());
+        let legacy_dir = state_home.path().join("cockpit-bar");
+        fs::create_dir_all(&legacy_dir).expect("create legacy state directory");
+        fs::write(
+            legacy_dir.join("timers.json"),
+            r#"{"timers":[{"id":"legacy","label":"Focus","remaining_seconds":60,"target_epoch":null,"completed":false}]}"#,
+        )
+        .expect("write legacy timer state");
+
+        let mut store = TimerStore::load(1_800_000_000).expect("load legacy timer state");
+        let timers = store.snapshot(1_800_000_000).expect("snapshot timers");
+
+        assert_eq!(timers.len(), 1);
+        assert_eq!(timers[0].id, "legacy");
+        assert!(state_home.path().join("vigil/timers.json").exists());
     }
 
     #[test]
@@ -357,7 +396,7 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .expect("system time")
                 .as_nanos();
-            let path = std::env::temp_dir().join(format!("cockpit-bar-{label}-{unique}"));
+            let path = std::env::temp_dir().join(format!("vigil-{label}-{unique}"));
             fs::create_dir_all(&path).expect("create temp dir");
             Self { path }
         }

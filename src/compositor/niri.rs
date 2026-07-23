@@ -462,6 +462,45 @@ fn apply_event(
         return Ok(());
     }
 
+    if let Some(payload) = value.get("WorkspacesChanged") {
+        let workspaces: Vec<NiriWorkspace> = serde_json::from_value(
+            payload
+                .get("workspaces")
+                .cloned()
+                .ok_or_else(|| reconnect_error("WorkspacesChanged missing workspaces"))?,
+        )
+        .map_err(reconnect_error)?;
+
+        let mut seen_ids = std::collections::BTreeSet::new();
+        for workspace in workspaces {
+            let Some(output_name) = workspace.output else {
+                continue;
+            };
+            tracker.state.ensure_output(&output_name);
+            let workspace_id = workspace.id.to_string();
+            seen_ids.insert(workspace_id.clone());
+            tracker.state.workspaces.insert(
+                workspace_id.clone(),
+                super::RawWorkspace {
+                    id: workspace_id,
+                    label: workspace.name.unwrap_or_else(|| workspace.idx.to_string()),
+                    output: output_name.clone(),
+                    active: workspace.is_active,
+                    urgent_hint: workspace.is_urgent,
+                },
+            );
+            if workspace.is_focused {
+                tracker.state.focused_output = Some(output_name);
+            }
+        }
+        tracker
+            .state
+            .workspaces
+            .retain(|id, _| seen_ids.contains(id));
+        tracker.push_diffs(pending);
+        return Ok(());
+    }
+
     if let Some(payload) = value.get("WindowOpenedOrChanged") {
         let window: NiriWindowPayload = serde_json::from_value(
             payload

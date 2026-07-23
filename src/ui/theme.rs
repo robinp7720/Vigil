@@ -13,14 +13,14 @@ pub struct ThemePaths {
 
 pub fn resolve_theme_root(xdg_config_home: Option<&Path>, home: Option<&Path>) -> Result<PathBuf> {
     if let Some(root) = xdg_config_home {
-        return Ok(root.join("cockpit-bar"));
+        return Ok(root.join("vigil"));
     }
 
     if let Some(home) = home {
-        return Ok(home.join(".config").join("cockpit-bar"));
+        return Ok(home.join(".config").join("vigil"));
     }
 
-    Err(anyhow!("failed to resolve cockpit-bar theme directory"))
+    Err(anyhow!("failed to resolve Vigil theme directory"))
 }
 
 pub fn theme_paths_for_config(config_path: &Path) -> ThemePaths {
@@ -100,14 +100,14 @@ mod tests {
         let root = resolve_theme_root(Some(Path::new("/tmp/xdg")), Some(Path::new("/tmp/home")))
             .expect("xdg theme root");
 
-        assert_eq!(root, PathBuf::from("/tmp/xdg").join("cockpit-bar"));
+        assert_eq!(root, PathBuf::from("/tmp/xdg").join("vigil"));
     }
 
     #[test]
     fn theme_paths_fall_back_to_home_config_directory() {
         let root = resolve_theme_root(None, Some(Path::new("/tmp/home"))).expect("home theme root");
 
-        assert_eq!(root, PathBuf::from("/tmp/home/.config/cockpit-bar"));
+        assert_eq!(root, PathBuf::from("/tmp/home/.config/vigil"));
     }
 
     #[test]
@@ -147,7 +147,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("cockpit-bar-{label}-{unique}"));
+        let path = std::env::temp_dir().join(format!("vigil-{label}-{unique}"));
         fs::create_dir_all(&path).expect("temp dir");
         path
     }

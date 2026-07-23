@@ -37,7 +37,7 @@ pub fn prefer_artwork_candidate(best_pixels: u64, candidate_pixels: u64) -> bool
 pub fn spawn_artwork_loader() -> (Sender<ArtworkRequest>, Receiver<ArtworkResult>) {
     let (request_tx, request_rx) = mpsc::channel::<ArtworkRequest>();
     let (result_tx, result_rx) = mpsc::channel();
-    let cache_root = dirs::cache_dir().map(|root| root.join("cockpit-bar/artwork"));
+    let cache_root = dirs::cache_dir().map(|root| root.join("vigil/artwork"));
 
     thread::spawn(move || {
         let config = ureq::Agent::config_builder()
@@ -300,7 +300,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("cockpit-bar-artwork-{label}-{unique}"))
+        std::env::temp_dir().join(format!("vigil-artwork-{label}-{unique}"))
     }
 
     use std::path::PathBuf;

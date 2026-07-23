@@ -219,6 +219,7 @@ impl Default for ModuleConfig {
                 ModuleName::KeyboardLayout,
                 ModuleName::Resources,
                 ModuleName::Network,
+                ModuleName::Bluetooth,
                 ModuleName::BluetoothAudio,
                 ModuleName::Power,
                 ModuleName::Clock,
@@ -243,6 +244,7 @@ pub enum ModuleName {
     KeyboardLayout,
     Resources,
     Network,
+    Bluetooth,
     BluetoothAudio,
     Power,
     Clock,
@@ -383,7 +385,7 @@ mod tests {
 
     #[test]
     fn tracked_shape_parses_and_merges_defaults() {
-        let config = AppConfig::from_toml(include_str!("../../../bar/config.toml")).unwrap();
+        let config = AppConfig::from_toml(include_str!("../config.example.toml")).unwrap();
         assert_eq!(config.primary_output.as_deref(), Some("DP-5"));
         assert_eq!(config.thresholds.work_completed_seconds, 30);
         assert_eq!(config.thresholds.critical_snooze_seconds, 300);

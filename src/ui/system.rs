@@ -10,6 +10,7 @@ pub enum SystemModuleId {
     Keyboard,
     Resources,
     Network,
+    Bluetooth,
     Audio,
     Power,
     Clock,
@@ -21,6 +22,7 @@ impl SystemModuleId {
             Self::Keyboard => "keyboard",
             Self::Resources => "resources",
             Self::Network => "network",
+            Self::Bluetooth => "bluetooth",
             Self::Audio => "audio",
             Self::Power => "power",
             Self::Clock => "clock",
@@ -32,6 +34,7 @@ impl SystemModuleId {
             ModuleName::KeyboardLayout => Some(Self::Keyboard),
             ModuleName::Resources => Some(Self::Resources),
             ModuleName::Network => Some(Self::Network),
+            ModuleName::Bluetooth => Some(Self::Bluetooth),
             ModuleName::BluetoothAudio => Some(Self::Audio),
             ModuleName::Power => Some(Self::Power),
             ModuleName::Clock => Some(Self::Clock),
@@ -113,6 +116,7 @@ fn build_button_spec(
         SystemModuleId::Keyboard => keyboard_button(snapshot),
         SystemModuleId::Resources => resources_button(snapshot),
         SystemModuleId::Network => network_button(snapshot),
+        SystemModuleId::Bluetooth => bluetooth_button(snapshot),
         SystemModuleId::Audio => audio_button(snapshot),
         SystemModuleId::Power => power_button(snapshot, config),
         SystemModuleId::Clock => clock_button(snapshot),
@@ -190,6 +194,57 @@ fn network_button(snapshot: &BarSnapshot) -> SystemButtonSpec {
         label: None,
         tooltip: with_health_note(network_tooltip(snapshot), health),
         classes,
+    }
+}
+
+fn bluetooth_button(snapshot: &BarSnapshot) -> SystemButtonSpec {
+    let bluetooth = &snapshot.system.bluetooth;
+    let health = snapshot.system.source_health.get(&SourceId::Bluetooth);
+    let mut classes = base_classes(SystemModuleId::Bluetooth);
+    if !bluetooth.available || !bluetooth.powered {
+        classes.push("inactive".to_string());
+    }
+    apply_health(&mut classes, health);
+
+    SystemButtonSpec {
+        id: SystemModuleId::Bluetooth,
+        icon_name: bluetooth_icon(bluetooth).to_string(),
+        label: None,
+        tooltip: with_health_note(bluetooth_tooltip(bluetooth), health),
+        classes,
+    }
+}
+
+fn bluetooth_icon(bluetooth: &crate::BluetoothState) -> &'static str {
+    if !bluetooth.available || !bluetooth.powered {
+        "bluetooth-disabled-symbolic"
+    } else if bluetooth.devices.iter().any(|device| device.connected) {
+        "bluetooth-active-symbolic"
+    } else {
+        "bluetooth-symbolic"
+    }
+}
+
+fn bluetooth_tooltip(bluetooth: &crate::BluetoothState) -> String {
+    if !bluetooth.available {
+        return "Bluetooth unavailable".to_string();
+    }
+    if !bluetooth.powered {
+        return "Bluetooth off".to_string();
+    }
+    let connected = bluetooth
+        .devices
+        .iter()
+        .filter(|device| device.connected)
+        .count();
+    match connected {
+        0 => "Bluetooth on".to_string(),
+        1 => bluetooth
+            .connected_device
+            .as_ref()
+            .map(|device| format!("Bluetooth: {device}"))
+            .unwrap_or_else(|| "1 device connected".to_string()),
+        n => format!("{n} devices connected"),
     }
 }
 
@@ -446,9 +501,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::{
-        AppConfig, AudioState, BarSnapshot, BluetoothState, ClockState, ConnectivityState,
-        KeyboardLayoutOption, KeyboardLayoutState, ModuleName, NetworkState, PowerProfile,
-        PowerState, ResourceState, SourceHealth, SourceId,
+        AppConfig, AudioState, BarSnapshot, BluetoothDeviceState, BluetoothState, ClockState,
+        ConnectivityState, KeyboardLayoutOption, KeyboardLayoutState, ModuleName, NetworkState,
+        PowerProfile, PowerState, ResourceState, SourceHealth, SourceId,
     };
 
     use super::{SystemModuleId, build_system_cluster};
@@ -654,6 +709,71 @@ mod tests {
         assert!(!audio.classes.iter().any(|class| class == "disconnected"));
         assert!(audio.tooltip.contains("Bluetooth off"));
         assert!(audio.tooltip.contains("42%"));
+    }
+
+    #[test]
+    fn bluetooth_status_button_shows_disabled_icon_when_powered_off() {
+        let mut snapshot = snapshot();
+        snapshot.system.bluetooth = BluetoothState {
+            available: true,
+            powered: false,
+            ..BluetoothState::default()
+        };
+
+        let cluster = build_system_cluster(&snapshot, &AppConfig::default());
+        let bluetooth = cluster.module(SystemModuleId::Bluetooth);
+
+        assert_eq!(bluetooth.icon_name, "bluetooth-disabled-symbolic");
+        assert!(bluetooth.classes.iter().any(|class| class == "inactive"));
+        assert!(bluetooth.tooltip.contains("off"));
+    }
+
+    #[test]
+    fn bluetooth_status_button_shows_idle_icon_when_powered_with_no_devices() {
+        let mut snapshot = snapshot();
+        snapshot.system.bluetooth = BluetoothState {
+            available: true,
+            powered: true,
+            ..BluetoothState::default()
+        };
+
+        let cluster = build_system_cluster(&snapshot, &AppConfig::default());
+        let bluetooth = cluster.module(SystemModuleId::Bluetooth);
+
+        assert_eq!(bluetooth.icon_name, "bluetooth-symbolic");
+        assert!(!bluetooth.classes.iter().any(|class| class == "inactive"));
+    }
+
+    #[test]
+    fn bluetooth_status_button_shows_active_icon_and_device_name_when_connected() {
+        let mut snapshot = snapshot();
+        snapshot.system.bluetooth = BluetoothState {
+            available: true,
+            powered: true,
+            connected_device: Some("Sony Headphones".to_string()),
+            devices: vec![BluetoothDeviceState {
+                connected: true,
+                ..BluetoothDeviceState::default()
+            }],
+            ..BluetoothState::default()
+        };
+
+        let cluster = build_system_cluster(&snapshot, &AppConfig::default());
+        let bluetooth = cluster.module(SystemModuleId::Bluetooth);
+
+        assert_eq!(bluetooth.icon_name, "bluetooth-active-symbolic");
+        assert!(bluetooth.tooltip.contains("Sony Headphones"));
+    }
+
+    #[test]
+    fn build_system_cluster_includes_bluetooth_by_default() {
+        let cluster = build_system_cluster(&snapshot(), &AppConfig::default());
+        assert!(
+            cluster
+                .modules()
+                .iter()
+                .any(|module| module.button.id == SystemModuleId::Bluetooth)
+        );
     }
 
     #[test]
