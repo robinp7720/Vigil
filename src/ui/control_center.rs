@@ -2495,10 +2495,20 @@ pub(super) fn notification_row(
         notification.app_name, notification.summary
     ))]);
 
+    let attachment = notification_attachment(notification);
+    let has_avatar = attachment
+        .as_ref()
+        .is_some_and(|(_, presentation)| *presentation == NotificationImagePresentation::Avatar);
+    let copy = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    copy.add_css_class("notification-copy");
+    copy.set_hexpand(true);
+
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let icon = notification_icon(notification);
-    icon.set_pixel_size(if compact { 28 } else { 34 });
-    header.append(&icon);
+    if !has_avatar {
+        let icon = notification_icon(notification);
+        icon.set_pixel_size(if compact { 28 } else { 34 });
+        header.append(&icon);
+    }
     let app = gtk::Label::new(Some(&if notification.duplicate_count > 1 {
         format!(
             "{} · {} similar",
@@ -2522,14 +2532,14 @@ pub(super) fn notification_row(
         dismiss.set_sensitive(false);
     }
     header.append(&dismiss);
-    row.append(&header);
+    copy.append(&header);
 
     let summary = gtk::Label::new(Some(&notification.summary));
     summary.add_css_class("notification-summary");
     summary.set_xalign(0.0);
     summary.set_wrap(true);
     summary.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-    row.append(&summary);
+    copy.append(&summary);
 
     if !notification.body.is_empty() {
         let body = gtk::Label::new(None);
@@ -2555,15 +2565,34 @@ pub(super) fn notification_row(
         } else {
             body.set_label(&notification.body);
         }
-        row.append(&body);
+        copy.append(&body);
     }
 
-    if let Some(path) = notification
-        .image_path
-        .as_ref()
-        .filter(|path| path.is_file())
-    {
-        let picture = gtk::Picture::for_filename(path);
+    if has_avatar {
+        let main = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        main.add_css_class("notification-main");
+        let avatar_frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        avatar_frame.add_css_class("notification-avatar-frame");
+        avatar_frame.set_halign(gtk::Align::Start);
+        avatar_frame.set_valign(gtk::Align::Start);
+        avatar_frame.set_overflow(gtk::Overflow::Hidden);
+        let avatar_size = if compact { 48 } else { 56 };
+        avatar_frame.set_size_request(avatar_size, avatar_size);
+        if let Some((picture, _)) = attachment.as_ref() {
+            picture.add_css_class("notification-avatar");
+            picture.set_can_shrink(true);
+            picture.set_content_fit(gtk::ContentFit::Cover);
+            picture.set_size_request(avatar_size, avatar_size);
+            avatar_frame.append(picture);
+        }
+        main.append(&avatar_frame);
+        main.append(&copy);
+        row.append(&main);
+    } else {
+        row.append(&copy);
+    }
+
+    if let Some((picture, NotificationImagePresentation::Media)) = attachment {
         picture.add_css_class("notification-image");
         picture.set_can_shrink(true);
         picture.set_content_fit(gtk::ContentFit::Cover);
@@ -2601,6 +2630,44 @@ pub(super) fn notification_row(
         row.append(&actions);
     }
     row
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NotificationImagePresentation {
+    Avatar,
+    Media,
+}
+
+fn notification_attachment(
+    notification: &Notification,
+) -> Option<(gtk::Picture, NotificationImagePresentation)> {
+    let path = notification
+        .image_path
+        .as_ref()
+        .filter(|path| path.is_file())?;
+    match gtk::gdk::Texture::from_filename(path) {
+        Ok(texture) => {
+            let presentation = notification_image_presentation(texture.width(), texture.height());
+            Some((gtk::Picture::for_paintable(&texture), presentation))
+        }
+        Err(_) => Some((
+            gtk::Picture::for_filename(path),
+            NotificationImagePresentation::Media,
+        )),
+    }
+}
+
+fn notification_image_presentation(width: i32, height: i32) -> NotificationImagePresentation {
+    if width <= 0 || height <= 0 {
+        return NotificationImagePresentation::Media;
+    }
+    let shorter = i64::from(width.min(height));
+    let longer = i64::from(width.max(height));
+    if shorter * 5 >= longer * 4 {
+        NotificationImagePresentation::Avatar
+    } else {
+        NotificationImagePresentation::Media
+    }
 }
 
 fn notification_icon(notification: &Notification) -> gtk::Image {
@@ -4781,10 +4848,11 @@ mod tests {
 
     use super::{
         ControlCenterErrors, ControlCenterFocus, ControlCenterMotionEvent,
-        ControlCenterMotionPhase, MetricLevel, SliderDebounce, TimerActionState, TimerControlSpec,
-        build_control_center_spec, control_center_origin, events_for_local_day, focus_from_origin,
-        format_network_rate, live_percent_label, metric_visual, quick_grid_placements,
-        timer_action_state, volume_icon_name,
+        ControlCenterMotionPhase, MetricLevel, NotificationImagePresentation, SliderDebounce,
+        TimerActionState, TimerControlSpec, build_control_center_spec, control_center_origin,
+        events_for_local_day, focus_from_origin, format_network_rate, live_percent_label,
+        metric_visual, notification_image_presentation, quick_grid_placements, timer_action_state,
+        volume_icon_name,
     };
 
     #[test]
@@ -4854,6 +4922,31 @@ mod tests {
             volume_icon_name(false, Some(67)),
             "audio-volume-high-symbolic"
         );
+    }
+
+    #[test]
+    fn notification_images_use_avatar_layout_only_for_near_square_shapes() {
+        for (width, height) in [(64, 64), (320, 320), (167, 167), (80, 100), (125, 100)] {
+            assert_eq!(
+                notification_image_presentation(width, height),
+                NotificationImagePresentation::Avatar,
+                "{width}x{height}"
+            );
+        }
+        for (width, height) in [
+            (1600, 900),
+            (900, 1600),
+            (79, 100),
+            (126, 100),
+            (0, 64),
+            (64, -1),
+        ] {
+            assert_eq!(
+                notification_image_presentation(width, height),
+                NotificationImagePresentation::Media,
+                "{width}x{height}"
+            );
+        }
     }
 
     #[test]
