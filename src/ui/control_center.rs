@@ -1555,6 +1555,10 @@ impl ControlCenterView {
             summary_tile("battery-good-symbolic", "Battery");
         let (time_summary_button, time_summary) =
             summary_tile("preferences-system-time-symbolic", "Focus");
+        keyboard_summary_button.add_css_class("keyboard");
+        resources_summary_button.add_css_class("resources");
+        battery_summary_button.add_css_class("power");
+        time_summary_button.add_css_class("clock");
         connect_navigation(
             &keyboard_summary_button,
             ControlCenterFocus::Keyboard,
@@ -2350,6 +2354,7 @@ fn toggle_tile(
 ) -> ToggleTile {
     let root = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     root.add_css_class("quick-tile");
+    root.add_css_class(focus.as_str());
     let body = tile_body(icon_name, title);
     connect_navigation(&body.button, focus, navigation);
     let toggle = gtk::Switch::new();
@@ -2373,6 +2378,7 @@ fn action_tile(
 ) -> ActionTile {
     let root = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     root.add_css_class("quick-tile");
+    root.add_css_class(focus.as_str());
     let body = tile_body(icon_name, title);
     connect_navigation(&body.button, focus, navigation);
     let action = icon_button("view-refresh-symbolic", "Cycle power profile");
