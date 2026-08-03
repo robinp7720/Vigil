@@ -844,7 +844,9 @@ fn handle_control_request(
         }
         request @ (ControlRequest::ContextGet { .. }
         | ControlRequest::ContextExecute { .. }
-        | ControlRequest::ControlCenterOpen { .. }) => {
+        | ControlRequest::ControlCenterOpen { .. }
+        | ControlRequest::ControlCenterClose
+        | ControlRequest::LockscreenGet) => {
             let (response_tx, response_rx) = mpsc::channel();
             control_tx
                 .send(UiControlRequest {
@@ -914,6 +916,16 @@ fn drain_control_requests(runtime: &mut UiRuntime) {
                         message: "the primary quick-settings surface is unavailable".to_string(),
                     }
                 });
+            }
+            ControlRequest::ControlCenterClose => {
+                runtime.registry.close_control_center();
+                let _ = request.response_tx.send(ControlResponse::Accepted);
+            }
+            ControlRequest::LockscreenGet => {
+                let snapshot = crate::lockscreen_snapshot(runtime.store.snapshot());
+                let _ = request
+                    .response_tx
+                    .send(ControlResponse::Lockscreen { snapshot });
             }
             _ => {
                 let _ = request.response_tx.send(ControlResponse::Error {

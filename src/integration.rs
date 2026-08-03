@@ -1,9 +1,53 @@
 use anyhow::{Result, bail};
 
 use crate::{
-    ActionIntent, BarSnapshot, ContextAction, ContextActionSpec, ContextHealth, ContextSnapshot,
-    DesktopContext, MediaControlAction, PlaybackStatus, PowerProfile, SourceHealth, SourceId,
+    ActionIntent, BarSnapshot, ConnectivityState, ContextAction, ContextActionSpec, ContextHealth,
+    ContextSnapshot, DesktopContext, LockscreenSnapshot, MediaControlAction, PlaybackStatus,
+    PowerProfile, SourceHealth, SourceId,
 };
+
+pub fn lockscreen_snapshot(snapshot: &BarSnapshot) -> LockscreenSnapshot {
+    let active_timer = snapshot
+        .system
+        .timers
+        .iter()
+        .filter(|timer| !timer.completed)
+        .min_by_key(|timer| timer.remaining_seconds);
+    let network_label = snapshot
+        .system
+        .network
+        .label
+        .clone()
+        .filter(|label| !label.trim().is_empty())
+        .unwrap_or_else(|| match snapshot.system.network.connectivity {
+            ConnectivityState::Connected => "Connected".to_string(),
+            ConnectivityState::Connecting => "Connecting".to_string(),
+            ConnectivityState::Disconnected => "Offline".to_string(),
+            ConnectivityState::Unknown => "Network unavailable".to_string(),
+        });
+    let power = &snapshot.system.power;
+    let power_label = if power.battery_present {
+        power.battery_percent.map_or_else(
+            || "Battery present".to_string(),
+            |percent| {
+                format!(
+                    "Battery {percent}%{}",
+                    if power.charging { " · Charging" } else { "" }
+                )
+            },
+        )
+    } else {
+        power_profile_label(&power.profile).to_string()
+    };
+
+    LockscreenSnapshot {
+        active_timer_label: active_timer.map(|timer| timer.label.clone()),
+        active_timer_remaining_seconds: active_timer.map(|timer| timer.remaining_seconds),
+        network_label,
+        power_label,
+        unread_notifications: snapshot.system.notifications.unread_count,
+    }
+}
 
 pub fn context_snapshots(
     snapshot: &BarSnapshot,
@@ -684,11 +728,63 @@ fn format_duration(seconds: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{context_snapshot, intent_for_context_action};
+    use super::{context_snapshot, intent_for_context_action, lockscreen_snapshot};
     use crate::{
-        ActionIntent, AudioOutputState, ContextAction, DesktopContext, KeyboardLayoutOption,
-        PowerProfile,
+        ActionIntent, AudioOutputState, ConnectivityState, ContextAction, DesktopContext,
+        KeyboardLayoutOption, Notification, NotificationUrgency, PowerProfile, TimerState,
     };
+
+    #[test]
+    fn lockscreen_snapshot_exposes_context_without_notification_bodies() {
+        let mut snapshot = crate::BarSnapshot::default();
+        snapshot.system.network.connectivity = ConnectivityState::Connected;
+        snapshot.system.network.label = Some("Wired".to_string());
+        snapshot.system.power.profile = PowerProfile::Performance;
+        snapshot.system.notifications.unread_count = 2;
+        snapshot.system.notifications.items.push(Notification {
+            id: 1,
+            app_name: "Private app".to_string(),
+            app_icon: None,
+            summary: "Private notification".to_string(),
+            body: "Private body".to_string(),
+            actions: Vec::new(),
+            urgency: NotificationUrgency::Normal,
+            image_path: None,
+            desktop_entry: None,
+            progress: None,
+            received_at: 0,
+            expires_at: None,
+            transient: false,
+            resident: false,
+            actionable: false,
+            duplicate_count: 1,
+        });
+        snapshot.system.timers = vec![
+            TimerState {
+                id: "later".to_string(),
+                label: "Long focus".to_string(),
+                remaining_seconds: 1_200,
+                ..TimerState::default()
+            },
+            TimerState {
+                id: "next".to_string(),
+                label: "Tea".to_string(),
+                remaining_seconds: 90,
+                ..TimerState::default()
+            },
+        ];
+
+        let lockscreen = lockscreen_snapshot(&snapshot);
+
+        assert_eq!(lockscreen.active_timer_label.as_deref(), Some("Tea"));
+        assert_eq!(lockscreen.active_timer_remaining_seconds, Some(90));
+        assert_eq!(lockscreen.network_label, "Wired");
+        assert_eq!(lockscreen.power_label, "Performance");
+        assert_eq!(lockscreen.unread_notifications, 2);
+        let json = serde_json::to_string(&lockscreen).expect("serialize lockscreen snapshot");
+        assert!(!json.contains("Private notification"));
+        assert!(!json.contains("Private body"));
+    }
 
     #[test]
     fn audio_context_uses_live_output_and_volume_state() {

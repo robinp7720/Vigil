@@ -34,7 +34,9 @@ pub use config::{
     reload_runtime_config,
 };
 pub use context::{ContextCard, ContextTier, Dismissals, select_context};
-pub use integration::{context_snapshot, context_snapshots, intent_for_context_action};
+pub use integration::{
+    context_snapshot, context_snapshots, intent_for_context_action, lockscreen_snapshot,
+};
 pub use ipc::{ControlClient, ControlRequest, ControlResponse, ControlSocket, control_socket_path};
 pub use model::{
     ActionIntent, ActivityState, ActivityStatus, ActivityUpdate, AudioOutputState, AudioState,
@@ -42,11 +44,11 @@ pub use model::{
     BluetoothPairingPromptKind, BluetoothPairingResponse, BluetoothState, BrightnessState,
     CalendarAgenda, CalendarAgendaEvent, CalendarEvent, ClockState, CommandActivity,
     ConnectivityState, ContextAction, ContextActionSpec, ContextHealth, ContextSnapshot,
-    DesktopContext, Direction, KeyboardLayoutOption, KeyboardLayoutState, MediaControlAction,
-    MediaState, NetworkState, Notification, NotificationAction, NotificationState,
-    NotificationUrgency, OutputRole, OutputState, PlaybackStatus, PowerProfile, PowerState,
-    ResourceState, SourceHealth, SourceId, StateUpdate, SystemState, SystemUpdate, TimerState,
-    WindowState, WorkspaceState,
+    DesktopContext, Direction, KeyboardLayoutOption, KeyboardLayoutState, LockscreenSnapshot,
+    MediaControlAction, MediaState, NetworkState, Notification, NotificationAction,
+    NotificationState, NotificationUrgency, OutputRole, OutputState, PlaybackStatus, PowerProfile,
+    PowerState, ResourceState, SourceHealth, SourceId, StateUpdate, SystemState, SystemUpdate,
+    TimerState, WindowState, WorkspaceState,
 };
 pub use notifications::{NotificationCommand, NotificationControl, spawn_notification_server};
 pub use sources::{
@@ -100,6 +102,8 @@ pub fn run_test_control_server(requests: usize) -> Result<()> {
             ControlRequest::ContextGet { .. }
             | ControlRequest::ContextExecute { .. }
             | ControlRequest::ControlCenterOpen { .. }
+            | ControlRequest::ControlCenterClose
+            | ControlRequest::LockscreenGet
             | ControlRequest::NotificationsGet
             | ControlRequest::NotificationInvoke { .. }
             | ControlRequest::NotificationDismiss { .. }

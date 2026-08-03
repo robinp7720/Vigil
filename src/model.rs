@@ -546,6 +546,15 @@ pub struct TimerState {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockscreenSnapshot {
+    pub active_timer_label: Option<String>,
+    pub active_timer_remaining_seconds: Option<u64>,
+    pub network_label: String,
+    pub power_label: String,
+    pub unread_notifications: u16,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivityState {
     pub items: BTreeMap<String, CommandActivity>,
 }

@@ -619,6 +619,14 @@ impl SurfaceRegistry {
         surface.control_center.present();
         true
     }
+
+    pub fn close_control_center(&self) {
+        for surface in self.surfaces.values() {
+            if let SurfaceHandle::Primary(surface) = surface {
+                surface.control_center.dismiss();
+            }
+        }
+    }
 }
 
 fn toast_margin(index: usize) -> i32 {

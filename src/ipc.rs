@@ -8,7 +8,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::{ContextAction, ContextSnapshot, DesktopContext, NotificationState, TimerState};
+use crate::{
+    ContextAction, ContextSnapshot, DesktopContext, LockscreenSnapshot, NotificationState,
+    TimerState,
+};
 
 const TRY_SERVE_READ_TIMEOUT: Duration = Duration::from_millis(50);
 
@@ -50,6 +53,8 @@ pub enum ControlRequest {
         context: DesktopContext,
         output: Option<String>,
     },
+    ControlCenterClose,
+    LockscreenGet,
     NotificationsGet,
     NotificationInvoke {
         id: u32,
@@ -76,6 +81,9 @@ pub enum ControlResponse {
     },
     Notifications {
         state: NotificationState,
+    },
+    Lockscreen {
+        snapshot: LockscreenSnapshot,
     },
     ActionResult {
         success: bool,
@@ -447,6 +455,19 @@ mod tests {
                 context: DesktopContext::Bluetooth,
                 output: Some("DP-5".to_string()),
             }
+        );
+    }
+
+    #[test]
+    fn lockscreen_protocol_has_read_only_stable_tags() {
+        assert_eq!(
+            serde_json::to_string(&ControlRequest::LockscreenGet).expect("serialize request"),
+            r#"{"type":"lockscreen_get"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ControlRequest::ControlCenterClose)
+                .expect("serialize close request"),
+            r#"{"type":"control_center_close"}"#
         );
     }
 

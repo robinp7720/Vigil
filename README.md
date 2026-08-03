@@ -35,6 +35,19 @@ The user-only `${XDG_RUNTIME_DIR}/vigil.sock` also provides live desktop-context
 and validated actions to Luma. Quick-settings footers launch Luma with the current page and output;
 Luma can open the corresponding detailed quick-settings page through the same socket.
 
+The lockscreen uses two deliberately narrow IPC commands:
+
+```bash
+vigil control-center close
+vigil lockscreen snapshot
+```
+
+The snapshot contains only an active timer label and remaining duration,
+network and power summaries, and the unread-notification count. It never
+contains notification titles, bodies, senders, or actions. The shared session
+lock script closes Vigil before Hyprlock starts so an open panel cannot remain
+above the lock transition.
+
 Time & Focus provides a locale-aware month calendar with an on-demand daily agenda, an Evolution
 handoff for event editing, quick timer presets, and labeled custom timers. The agenda uses the
 range-based `scripts/next_event.sh --agenda-json` contract while the original next-event modes stay

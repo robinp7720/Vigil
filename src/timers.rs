@@ -139,6 +139,8 @@ impl TimerStore {
             | ControlRequest::ContextGet { .. }
             | ControlRequest::ContextExecute { .. }
             | ControlRequest::ControlCenterOpen { .. }
+            | ControlRequest::ControlCenterClose
+            | ControlRequest::LockscreenGet
             | ControlRequest::NotificationsGet
             | ControlRequest::NotificationInvoke { .. }
             | ControlRequest::NotificationDismiss { .. }

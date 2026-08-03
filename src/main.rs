@@ -26,6 +26,14 @@ enum Command {
         #[command(subcommand)]
         command: ActivityCommand,
     },
+    Lockscreen {
+        #[command(subcommand)]
+        command: LockscreenCommand,
+    },
+    ControlCenter {
+        #[command(subcommand)]
+        command: ControlCenterCommand,
+    },
     #[command(name = "__test_control_server", hide = true)]
     TestControlServer {
         #[arg(long, default_value_t = 1)]
@@ -80,6 +88,16 @@ enum ActivityCommand {
     },
 }
 
+#[derive(Debug, clap::Subcommand)]
+enum LockscreenCommand {
+    Snapshot,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum ControlCenterCommand {
+    Close,
+}
+
 fn default_config_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -113,6 +131,20 @@ fn run_cli(cli: Cli) -> Result<()> {
             handle_control_response(response)
         }
         Some(Command::Activity { command }) => handle_activity_command(command, &cli.config),
+        Some(Command::Lockscreen { command }) => {
+            let request = match command {
+                LockscreenCommand::Snapshot => vigil::ControlRequest::LockscreenGet,
+            };
+            let response = vigil::ControlClient::new()?.send(&request)?;
+            handle_control_response(response)
+        }
+        Some(Command::ControlCenter { command }) => {
+            let request = match command {
+                ControlCenterCommand::Close => vigil::ControlRequest::ControlCenterClose,
+            };
+            let response = vigil::ControlClient::new()?.send(&request)?;
+            handle_control_response(response)
+        }
         Some(Command::TestControlServer { requests }) => vigil::run_test_control_server(requests),
         Some(Command::Preview { scenario }) => vigil::run_preview(&cli.config, &scenario),
     }
