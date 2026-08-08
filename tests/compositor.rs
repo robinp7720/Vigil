@@ -633,6 +633,52 @@ fn compositor_fixtures_produce_equivalent_normalized_updates() {
 }
 
 #[test]
+fn compositor_hyprland_focus_clears_tracked_window_urgency() {
+    let snapshot = r#"{
+  "monitors": [{
+    "name": "DP-1",
+    "focused": true,
+    "activeWorkspace": { "id": 1 },
+    "lastWindow": "0x64"
+  }],
+  "workspaces": [{ "id": 1, "name": "1", "monitor": "DP-1" }],
+  "clients": [
+    {
+      "address": "0x64",
+      "workspace": { "id": 1 },
+      "class": "firefox",
+      "title": "Current work",
+      "urgent": false
+    },
+    {
+      "address": "0xc8",
+      "workspace": { "id": 1 },
+      "class": "org.signal.Signal",
+      "title": "Signal",
+      "urgent": true
+    }
+  ],
+  "devices": { "keyboards": [] }
+}"#;
+    let mut adapter =
+        HyprlandAdapter::new_for_test(snapshot, "activewindowv2>>0xc8\n", |_, _, _| Ok(()));
+
+    adapter.initial_snapshot().expect("initial snapshot");
+    let StateUpdate::Outputs(outputs) = adapter.next_update().expect("focus update") else {
+        panic!("expected output update");
+    };
+    let output = &outputs[0];
+
+    assert!(!output.urgent);
+    assert!(output.workspaces.iter().all(|workspace| !workspace.urgent));
+    assert!(output.windows.iter().all(|window| !window.urgent));
+    assert!(matches!(
+        output.focused_window.as_ref(),
+        Some(window) if window.id == "200" && !window.urgent
+    ));
+}
+
+#[test]
 fn compositor_hyprland_workspacev2_updates_same_output_activity() {
     let snapshot = r#"{
   "monitors": [

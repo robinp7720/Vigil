@@ -208,22 +208,43 @@ fn urgent_candidates(snapshot: &BarSnapshot) -> Vec<Candidate> {
     let mut candidates = Vec::new();
 
     for (output_name, output) in &snapshot.outputs {
-        if output.urgent {
+        let output_candidate_start = candidates.len();
+
+        for window in output.windows.iter().filter(|window| window.urgent) {
             candidates.push(Candidate {
                 card: ContextCard::Urgent {
                     output: output_name.clone(),
-                    workspace: None,
-                    window_id: None,
-                    window_title: output
-                        .focused_window
-                        .as_ref()
-                        .map(|window| window.title.clone()),
+                    workspace: window.workspace_id.clone(),
+                    window_id: Some(window.id.clone()),
+                    window_title: Some(window.title.clone()),
                 },
-                key: urgent_identity(output_name, None, None),
+                key: urgent_identity(output_name, None, Some(&window.id)),
                 generation: "urgent".to_string(),
                 tier: ContextTier::Critical,
                 action_deadline: None,
-                changed_at: output.changed_at,
+                changed_at: window.changed_at,
+            });
+        }
+
+        if let Some(window) = output.focused_window.as_ref().filter(|window| {
+            window.urgent
+                && !output
+                    .windows
+                    .iter()
+                    .any(|candidate| candidate.id == window.id)
+        }) {
+            candidates.push(Candidate {
+                card: ContextCard::Urgent {
+                    output: output_name.clone(),
+                    workspace: window.workspace_id.clone(),
+                    window_id: Some(window.id.clone()),
+                    window_title: Some(window.title.clone()),
+                },
+                key: urgent_identity(output_name, None, Some(&window.id)),
+                generation: "urgent".to_string(),
+                tier: ContextTier::Critical,
+                action_deadline: None,
+                changed_at: window.changed_at,
             });
         }
 
@@ -231,16 +252,20 @@ fn urgent_candidates(snapshot: &BarSnapshot) -> Vec<Candidate> {
             .workspaces
             .iter()
             .filter(|workspace| workspace.urgent)
+            .filter(|workspace| {
+                !output.windows.iter().any(|window| {
+                    window.urgent && window.workspace_id.as_deref() == Some(&workspace.id)
+                }) && !output.focused_window.as_ref().is_some_and(|window| {
+                    window.urgent && window.workspace_id.as_deref() == Some(&workspace.id)
+                })
+            })
         {
             candidates.push(Candidate {
                 card: ContextCard::Urgent {
                     output: output_name.clone(),
                     workspace: Some(workspace.id.clone()),
                     window_id: None,
-                    window_title: output
-                        .focused_window
-                        .as_ref()
-                        .map(|window| window.title.clone()),
+                    window_title: None,
                 },
                 key: urgent_identity(output_name, Some(&workspace.id), None),
                 generation: "urgent".to_string(),
@@ -250,23 +275,19 @@ fn urgent_candidates(snapshot: &BarSnapshot) -> Vec<Candidate> {
             });
         }
 
-        if let Some(window) = output
-            .focused_window
-            .as_ref()
-            .filter(|window| window.urgent)
-        {
+        if output.urgent && candidates.len() == output_candidate_start {
             candidates.push(Candidate {
                 card: ContextCard::Urgent {
                     output: output_name.clone(),
                     workspace: None,
-                    window_id: Some(window.id.clone()),
-                    window_title: Some(window.title.clone()),
+                    window_id: None,
+                    window_title: None,
                 },
-                key: urgent_identity(output_name, None, Some(&window.id)),
+                key: urgent_identity(output_name, None, None),
                 generation: "urgent".to_string(),
                 tier: ContextTier::Critical,
                 action_deadline: None,
-                changed_at: window.changed_at,
+                changed_at: output.changed_at,
             });
         }
     }
@@ -820,8 +841,8 @@ mod tests {
         snapshot
             .outputs
             .get_mut("DP-5")
-            .and_then(|output| output.focused_window.as_mut())
-            .expect("expected focused window")
+            .expect("expected output")
+            .windows[0]
             .title = "Build failed again".to_string();
 
         assert_eq!(
@@ -832,13 +853,97 @@ mod tests {
         snapshot
             .outputs
             .get_mut("DP-5")
-            .and_then(|output| output.focused_window.as_mut())
-            .expect("expected focused window")
+            .expect("expected output")
+            .windows[0]
             .id = "window-43".to_string();
 
         assert!(matches!(
             select_context(&snapshot, now, &thresholds, &dismissals),
             Some(ContextCard::Urgent { .. })
+        ));
+    }
+
+    #[test]
+    fn background_urgent_window_uses_its_own_title() {
+        let now = 1_800_000_000;
+        let mut snapshot = fixture_snapshot().build();
+        snapshot.outputs.insert(
+            "DP-5".to_string(),
+            OutputState {
+                name: "DP-5".to_string(),
+                workspaces: Vec::new(),
+                windows: vec![WindowState {
+                    id: "signal".to_string(),
+                    app_id: Some("org.signal.Signal".to_string()),
+                    title: "Signal".to_string(),
+                    urgent: true,
+                    workspace_id: Some("2".to_string()),
+                    changed_at: now,
+                }],
+                focused_window: Some(WindowState {
+                    id: "browser".to_string(),
+                    app_id: Some("firefox".to_string()),
+                    title: "Current work".to_string(),
+                    urgent: false,
+                    workspace_id: Some("1".to_string()),
+                    changed_at: now,
+                }),
+                urgent: true,
+                changed_at: now,
+            },
+        );
+
+        assert!(matches!(
+            select_context(
+                &snapshot,
+                now,
+                &ThresholdConfig::default(),
+                &Dismissals::default()
+            ),
+            Some(ContextCard::Urgent {
+                ref window_id,
+                ref window_title,
+                ..
+            }) if window_id.as_deref() == Some("signal")
+                && window_title.as_deref() == Some("Signal")
+        ));
+    }
+
+    #[test]
+    fn output_only_urgency_does_not_blame_the_focused_window() {
+        let now = 1_800_000_000;
+        let mut snapshot = fixture_snapshot().build();
+        snapshot.outputs.insert(
+            "DP-5".to_string(),
+            OutputState {
+                name: "DP-5".to_string(),
+                workspaces: Vec::new(),
+                windows: Vec::new(),
+                focused_window: Some(WindowState {
+                    id: "browser".to_string(),
+                    app_id: Some("firefox".to_string()),
+                    title: "Current work".to_string(),
+                    urgent: false,
+                    workspace_id: Some("1".to_string()),
+                    changed_at: now,
+                }),
+                urgent: true,
+                changed_at: now,
+            },
+        );
+
+        assert!(matches!(
+            select_context(
+                &snapshot,
+                now,
+                &ThresholdConfig::default(),
+                &Dismissals::default()
+            ),
+            Some(ContextCard::Urgent {
+                window_id: None,
+                window_title: None,
+                ..
+            })
         ));
     }
 
@@ -968,8 +1073,8 @@ mod tests {
         snapshot
             .outputs
             .get_mut("DP-5")
-            .and_then(|output| output.focused_window.as_mut())
-            .expect("expected focused window")
+            .expect("expected output")
+            .windows[0]
             .changed_at = now - 5;
         snapshot.system.power.changed_at = now - 10;
 

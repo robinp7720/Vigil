@@ -448,14 +448,20 @@ fn apply_event(
             let Some(output) = state.focused_output.clone() else {
                 return Ok(());
             };
-            let Some(raw_output) = state.outputs.get_mut(&output) else {
-                return Ok(());
-            };
-            raw_output.last_window_id = if payload.trim().is_empty() {
+            let window_id = if payload.trim().is_empty() {
                 None
             } else {
                 Some(super::normalize_window_id(payload))
             };
+            let Some(raw_output) = state.outputs.get_mut(&output) else {
+                return Ok(());
+            };
+            raw_output.last_window_id = window_id.clone();
+            if let Some(window_id) = window_id
+                && let Some(window) = state.windows.get_mut(&window_id)
+            {
+                window.urgent = false;
+            }
         }
         "windowtitlev2" => {
             let mut parts = payload.splitn(2, ',');
