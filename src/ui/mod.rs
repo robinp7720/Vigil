@@ -846,7 +846,9 @@ fn handle_control_request(
         | ControlRequest::ContextExecute { .. }
         | ControlRequest::ControlCenterOpen { .. }
         | ControlRequest::ControlCenterClose
-        | ControlRequest::LockscreenGet) => {
+        | ControlRequest::LockscreenGet
+        | ControlRequest::PresentationGet
+        | ControlRequest::PresentationSet { .. }) => {
             let (response_tx, response_rx) = mpsc::channel();
             control_tx
                 .send(UiControlRequest {
@@ -926,6 +928,16 @@ fn drain_control_requests(runtime: &mut UiRuntime) {
                 let _ = request
                     .response_tx
                     .send(ControlResponse::Lockscreen { snapshot });
+            }
+            ControlRequest::PresentationGet => {
+                let hidden = runtime.registry.presentation_hidden();
+                let _ = request
+                    .response_tx
+                    .send(ControlResponse::Presentation { hidden });
+            }
+            ControlRequest::PresentationSet { hidden } => {
+                runtime.registry.set_presentation_hidden(hidden);
+                let _ = request.response_tx.send(ControlResponse::Accepted);
             }
             _ => {
                 let _ = request.response_tx.send(ControlResponse::Error {

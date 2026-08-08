@@ -145,7 +145,9 @@ impl TimerStore {
             | ControlRequest::NotificationInvoke { .. }
             | ControlRequest::NotificationDismiss { .. }
             | ControlRequest::NotificationsClear
-            | ControlRequest::NotificationsSetDnd { .. } => {
+            | ControlRequest::NotificationsSetDnd { .. }
+            | ControlRequest::PresentationGet
+            | ControlRequest::PresentationSet { .. } => {
                 bail!("timer store cannot apply non-timer control requests");
             }
         }

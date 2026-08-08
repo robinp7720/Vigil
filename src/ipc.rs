@@ -67,6 +67,10 @@ pub enum ControlRequest {
     NotificationsSetDnd {
         enabled: bool,
     },
+    PresentationGet,
+    PresentationSet {
+        hidden: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +85,9 @@ pub enum ControlResponse {
     },
     Notifications {
         state: NotificationState,
+    },
+    Presentation {
+        hidden: bool,
     },
     Lockscreen {
         snapshot: LockscreenSnapshot,
@@ -569,6 +576,20 @@ mod tests {
         assert_eq!(
             existing_path_action(ExistingPathKind::NonSocket, 1_000, 1_000),
             ExistingPathAction::RejectNonSocket
+        );
+    }
+
+    #[test]
+    fn presentation_protocol_uses_stable_tagged_json() {
+        let request = ControlRequest::PresentationSet { hidden: true };
+        assert_eq!(
+            serde_json::to_string(&request).expect("serialize request"),
+            r#"{"type":"presentation_set","hidden":true}"#
+        );
+        let response = ControlResponse::Presentation { hidden: false };
+        assert_eq!(
+            serde_json::to_string(&response).expect("serialize response"),
+            r#"{"type":"presentation","hidden":false}"#
         );
     }
 

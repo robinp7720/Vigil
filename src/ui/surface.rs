@@ -341,6 +341,7 @@ struct ToastHandle {
 pub struct SurfaceRegistry {
     surfaces: BTreeMap<String, SurfaceHandle>,
     toasts: BTreeMap<u32, ToastHandle>,
+    presentation_hidden: bool,
     calendar_sender: Option<Sender<CalendarMonthRequest>>,
     dismissals: Rc<RefCell<Dismissals>>,
     context_dirty: Rc<Cell<bool>>,
@@ -359,6 +360,7 @@ impl SurfaceRegistry {
         Self {
             surfaces: BTreeMap::new(),
             toasts: BTreeMap::new(),
+            presentation_hidden: false,
             calendar_sender: None,
             dismissals: Rc::new(RefCell::new(Dismissals::default())),
             context_dirty: Rc::new(Cell::new(false)),
@@ -386,6 +388,7 @@ impl SurfaceRegistry {
         Self {
             surfaces: BTreeMap::new(),
             toasts: BTreeMap::new(),
+            presentation_hidden: false,
             calendar_sender,
             dismissals: Rc::new(RefCell::new(Dismissals::default())),
             context_dirty: Rc::new(Cell::new(false)),
@@ -396,6 +399,21 @@ impl SurfaceRegistry {
 
     pub fn take_context_dirty(&self) -> bool {
         self.context_dirty.replace(false)
+    }
+
+    pub fn presentation_hidden(&self) -> bool {
+        self.presentation_hidden
+    }
+
+    pub fn set_presentation_hidden(&mut self, hidden: bool) {
+        if self.presentation_hidden == hidden {
+            return;
+        }
+        self.presentation_hidden = hidden;
+        if hidden {
+            self.clear();
+        }
+        self.context_dirty.set(true);
     }
 
     fn reconcile_toasts(
@@ -497,6 +515,10 @@ impl SurfaceRegistry {
         config: &AppConfig,
         action_sender: &Sender<ActionRequest>,
     ) {
+        if self.presentation_hidden {
+            self.clear();
+            return;
+        }
         let suggestions = self.suggestions.borrow_mut().suggestions(
             snapshot,
             config,
@@ -2144,7 +2166,7 @@ mod tests {
         WindowState, WorkspaceState, reload_runtime_config,
     };
 
-    use super::{RenderPlan, SurfaceSpec, surface_specs};
+    use super::{RenderPlan, SurfaceRegistry, SurfaceSpec, surface_specs};
 
     #[test]
     fn surface_specs_choose_configured_primary_and_reduce_other_outputs() {
@@ -2592,6 +2614,20 @@ mod tests {
     fn bar_window_width_matches_monitor_width_minus_layer_margins() {
         assert_eq!(super::bar_window_width_for_monitor_width(3_840), 3_830);
         assert_eq!(super::bar_window_width_for_monitor_width(1), 1);
+    }
+
+    #[test]
+    fn presentation_visibility_is_stateful_and_requests_reconcile() {
+        let mut registry = SurfaceRegistry::new();
+        assert!(!registry.presentation_hidden());
+
+        registry.set_presentation_hidden(true);
+        assert!(registry.presentation_hidden());
+        assert!(registry.take_context_dirty());
+
+        registry.set_presentation_hidden(false);
+        assert!(!registry.presentation_hidden());
+        assert!(registry.take_context_dirty());
     }
 
     fn snapshot<const N: usize>(outputs: [OutputState; N]) -> BarSnapshot {

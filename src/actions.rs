@@ -299,6 +299,7 @@ impl ActionBackend for SystemActionBackend {
             | ControlResponse::Timers { .. }
             | ControlResponse::Contexts { .. }
             | ControlResponse::Notifications { .. }
+            | ControlResponse::Presentation { .. }
             | ControlResponse::Lockscreen { .. }
             | ControlResponse::ActionResult { success: true, .. } => Ok(()),
             ControlResponse::ActionResult {

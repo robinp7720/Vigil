@@ -108,7 +108,9 @@ pub fn run_test_control_server(requests: usize) -> Result<()> {
             | ControlRequest::NotificationInvoke { .. }
             | ControlRequest::NotificationDismiss { .. }
             | ControlRequest::NotificationsClear
-            | ControlRequest::NotificationsSetDnd { .. } => Ok(ControlResponse::Error {
+            | ControlRequest::NotificationsSetDnd { .. }
+            | ControlRequest::PresentationGet
+            | ControlRequest::PresentationSet { .. } => Ok(ControlResponse::Error {
                 message: "desktop integration requires the running bar UI".to_string(),
             }),
         })?;
