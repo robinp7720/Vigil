@@ -908,9 +908,10 @@ fn drain_control_requests(runtime: &mut UiRuntime) {
                 }
             }
             ControlRequest::ControlCenterOpen { context, output } => {
+                let focused_output = runtime.store.snapshot().focused_output.clone();
                 let opened = runtime
                     .registry
-                    .open_control_center(context, output.as_deref());
+                    .open_control_center(context, output.as_deref().or(focused_output.as_deref()));
                 let _ = request.response_tx.send(if opened {
                     ControlResponse::Accepted
                 } else {

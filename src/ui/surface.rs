@@ -31,7 +31,6 @@ const BAR_HEIGHT: i32 = 44;
 const SURFACE_MARGIN: i32 = 5;
 const WORKSPACE_BUTTON_MIN_WIDTH: i32 = 32;
 const WORKSPACE_BUTTON_MIN_HEIGHT: i32 = 28;
-const CENTER_SLOT_MIN_WIDTH: i32 = 360;
 const CENTER_TEXT_MAX_CHARS: i32 = 56;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -626,17 +625,21 @@ impl SurfaceRegistry {
         context: DesktopContext,
         requested_output: Option<&str>,
     ) -> bool {
-        let requested = requested_output.and_then(|output| self.surfaces.get(output));
-        let primary = requested
-            .filter(|surface| matches!(surface, SurfaceHandle::Primary(_)))
-            .or_else(|| {
-                self.surfaces
-                    .values()
-                    .find(|surface| matches!(surface, SurfaceHandle::Primary(_)))
-            });
-        let Some(SurfaceHandle::Primary(surface)) = primary else {
+        let Some((primary_output, SurfaceHandle::Primary(surface))) = self
+            .surfaces
+            .iter()
+            .find(|(_, surface)| matches!(surface, SurfaceHandle::Primary(_)))
+        else {
             return false;
         };
+        let target_output = requested_output
+            .filter(|output| self.surfaces.contains_key(*output))
+            .unwrap_or(primary_output);
+        if let Some(display) = gdk::Display::default()
+            && let Some(monitor) = monitors_by_connector(&display).get(target_output)
+        {
+            surface.control_center.set_monitor(monitor);
+        }
         surface.control_center.show_page(context.into());
         surface.control_center.present();
         true
@@ -800,7 +803,6 @@ impl PrimarySurface {
         left.set_halign(gtk::Align::Start);
         center_slot.set_halign(gtk::Align::Center);
         center_slot.set_hexpand(false);
-        center_slot.set_size_request(CENTER_SLOT_MIN_WIDTH, -1);
         right.set_halign(gtk::Align::End);
 
         let workspaces = WorkspaceStrip::new(action_sender.clone(), spec.output_name.clone());
@@ -854,6 +856,10 @@ impl PrimarySurface {
         context_row.add_css_class("context-chip");
         context_row.set_hexpand(false);
         context_row.set_halign(gtk::Align::Center);
+        context_row.set_accessible_role(gtk::AccessibleRole::Button);
+        context_row.update_property(&[gtk::accessible::Property::Description(
+            "Open this context; use secondary click to dismiss it",
+        )]);
         let context_icon = gtk::Image::new();
         context_icon.add_css_class("context-icon");
         context_icon.set_pixel_size(16);
@@ -1133,6 +1139,7 @@ impl PrimarySurface {
                     )
                 };
                 self.context_label.set_label(&text);
+                set_context_accessibility(&self.context_row, &text);
                 clear_tier_classes(&self.context_row);
                 clear_context_motion_classes(&self.context_row);
                 self.context_row.add_css_class("notification-preview");
@@ -1142,6 +1149,7 @@ impl PrimarySurface {
             } else if let Some(context) = spec.context.as_ref() {
                 self.context_icon.set_icon_name(Some(&context.icon_name));
                 self.context_label.set_label(&context.text);
+                set_context_accessibility(&self.context_row, &context.text);
                 apply_tier_classes(&self.context_row, context.tier);
                 apply_context_motion_classes(&self.context_row, &context.card);
                 self.context_stack.set_visible_child_name("context");
@@ -1155,6 +1163,7 @@ impl PrimarySurface {
             } else if let Some(suggestion) = spec.suggestion.as_ref() {
                 self.context_icon.set_icon_name(Some(&suggestion.icon_name));
                 self.context_label.set_label(&suggestion.title);
+                set_context_accessibility(&self.context_row, &suggestion.title);
                 clear_tier_classes(&self.context_row);
                 clear_context_motion_classes(&self.context_row);
                 self.context_row.add_css_class("suggestion");
@@ -1847,6 +1856,8 @@ impl StatusButtonView {
             || ((self.label.is_visible() || spec.label.is_some())
                 && spec.label.as_deref() != Some(self.label.label().as_str()));
         self.button.set_tooltip_text(Some(&spec.tooltip));
+        self.button
+            .update_property(&[gtk::accessible::Property::Label(&spec.tooltip)]);
         for class_name in std::mem::take(&mut self.classes) {
             self.button.remove_css_class(&class_name);
         }
@@ -1866,6 +1877,10 @@ impl StatusButtonView {
             flash_class(&self.button, "state-changed", 480);
         }
     }
+}
+
+fn set_context_accessibility(widget: &gtk::Box, label: &str) {
+    widget.update_property(&[gtk::accessible::Property::Label(label)]);
 }
 
 fn build_status_button(

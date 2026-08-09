@@ -2005,6 +2005,10 @@ impl ControlCenterView {
         &self.window
     }
 
+    pub fn set_monitor(&self, monitor: &gtk::gdk::Monitor) {
+        self.window.set_monitor(Some(monitor));
+    }
+
     pub fn present(&self) {
         self.motion.present();
         sync_bluetooth_discovery(

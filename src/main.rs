@@ -95,6 +95,12 @@ enum LockscreenCommand {
 
 #[derive(Debug, clap::Subcommand)]
 enum ControlCenterCommand {
+    Open {
+        #[arg(long, default_value = "overview", value_parser = parse_desktop_context)]
+        context: vigil::DesktopContext,
+        #[arg(long)]
+        output: Option<String>,
+    },
     Close,
 }
 
@@ -140,6 +146,9 @@ fn run_cli(cli: Cli) -> Result<()> {
         }
         Some(Command::ControlCenter { command }) => {
             let request = match command {
+                ControlCenterCommand::Open { context, output } => {
+                    vigil::ControlRequest::ControlCenterOpen { context, output }
+                }
                 ControlCenterCommand::Close => vigil::ControlRequest::ControlCenterClose,
             };
             let response = vigil::ControlClient::new()?.send(&request)?;
@@ -148,6 +157,13 @@ fn run_cli(cli: Cli) -> Result<()> {
         Some(Command::TestControlServer { requests }) => vigil::run_test_control_server(requests),
         Some(Command::Preview { scenario }) => vigil::run_preview(&cli.config, &scenario),
     }
+}
+
+fn parse_desktop_context(text: &str) -> Result<vigil::DesktopContext, String> {
+    vigil::DesktopContext::ALL
+        .into_iter()
+        .find(|context| context.as_str() == text)
+        .ok_or_else(|| format!("unknown control-center context: {text}"))
 }
 
 fn timer_request(command: TimerCommand) -> Result<vigil::ControlRequest> {
@@ -275,7 +291,9 @@ fn parse_duration_seconds(text: &str) -> Result<u64> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{ActivityCommand, activity_request, encode_activity_shell_rules};
+    use super::{
+        ActivityCommand, activity_request, encode_activity_shell_rules, parse_desktop_context,
+    };
 
     #[test]
     fn activity_start_request_uses_label_cwd_and_timestamp() {
@@ -342,5 +360,14 @@ mod tests {
             payload,
             b"Cargo nextest\0cargo nextest\0Pytest\0pytest\0".to_vec()
         );
+    }
+
+    #[test]
+    fn control_center_context_parser_accepts_public_context_names() {
+        assert_eq!(
+            parse_desktop_context("notifications"),
+            Ok(vigil::DesktopContext::Notifications)
+        );
+        assert!(parse_desktop_context("unknown").is_err());
     }
 }
