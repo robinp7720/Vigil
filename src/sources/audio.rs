@@ -134,11 +134,31 @@ fn command_stdout<const N: usize>(program: &str, args: [&str; N]) -> Result<Stri
     String::from_utf8(output.stdout).with_context(|| format!("{program} output was not UTF-8"))
 }
 
-fn spawn_audio_bridge() -> Result<(Child, mpsc::Receiver<Result<String>>)> {
+struct ManagedChild(Child);
+
+impl ManagedChild {
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.0.try_wait()
+    }
+
+    #[cfg(test)]
+    fn id(&self) -> u32 {
+        self.0.id()
+    }
+}
+
+impl Drop for ManagedChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn spawn_audio_bridge() -> Result<(ManagedChild, mpsc::Receiver<Result<String>>)> {
     let mut child = Command::new("pactl")
         .arg("subscribe")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .context("failed to execute pactl subscribe")?;
     let stdout = child
@@ -148,7 +168,7 @@ fn spawn_audio_bridge() -> Result<(Child, mpsc::Receiver<Result<String>>)> {
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || pump_lines(stdout, tx));
-    Ok((child, rx))
+    Ok((ManagedChild(child), rx))
 }
 
 fn pump_lines(stdout: ChildStdout, sender: mpsc::Sender<Result<String>>) {
@@ -168,22 +188,27 @@ fn pump_lines(stdout: ChildStdout, sender: mpsc::Sender<Result<String>>) {
     }
 }
 
+fn audio_event_requires_refresh(line: &str) -> bool {
+    [" on sink #", " on server", " on card #"]
+        .iter()
+        .any(|kind| line.contains(kind))
+}
+
 fn run_audio_worker(sender: &Sender<StateUpdate>, cancelled: &Arc<AtomicBool>) -> Result<bool> {
     publish_audio_snapshot(sender, cancelled)?;
 
     let (mut child, receiver) = spawn_audio_bridge()?;
     loop {
         if cancelled.load(Ordering::Relaxed) {
-            kill_child(&mut child);
             return Ok(false);
         }
 
         match receiver.recv_timeout(AUDIO_EVENT_TIMEOUT) {
-            Ok(Ok(_line)) => publish_audio_snapshot(sender, cancelled)?,
-            Ok(Err(error)) => {
-                kill_child(&mut child);
-                return Err(error);
+            Ok(Ok(line)) if audio_event_requires_refresh(&line) => {
+                publish_audio_snapshot(sender, cancelled)?
             }
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => return Err(error),
             Err(RecvTimeoutError::Timeout) => {
                 if let Some(status) = child.try_wait().context("failed to poll pactl subscribe")? {
                     if status.success() {
@@ -197,11 +222,6 @@ fn run_audio_worker(sender: &Sender<StateUpdate>, cancelled: &Arc<AtomicBool>) -
             }
         }
     }
-}
-
-fn kill_child(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 pub fn spawn_audio_source(
@@ -226,7 +246,11 @@ pub fn spawn_audio_source(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_pactl_outputs, parse_wpctl_volume};
+    use std::process::Command;
+
+    use super::{
+        ManagedChild, audio_event_requires_refresh, parse_pactl_outputs, parse_wpctl_volume,
+    };
     use crate::{AudioOutputState, AudioState};
 
     #[test]
@@ -304,5 +328,27 @@ mod tests {
             parse_pactl_outputs(r#"{"default_sink_name":null}"#, "[]").unwrap(),
             Vec::new()
         );
+    }
+
+    #[test]
+    fn managed_child_is_killed_and_reaped_on_every_return_path() {
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let child = ManagedChild(child);
+        let pid = child.id();
+
+        assert!(std::path::Path::new(&format!("/proc/{pid}")).exists());
+        drop(child);
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+    }
+
+    #[test]
+    fn audio_subscription_ignores_query_client_churn() {
+        assert!(!audio_event_requires_refresh("Event 'new' on client #42"));
+        assert!(!audio_event_requires_refresh(
+            "Event 'remove' on client #42"
+        ));
+        assert!(audio_event_requires_refresh("Event 'change' on sink #7"));
+        assert!(audio_event_requires_refresh("Event 'change' on server"));
+        assert!(audio_event_requires_refresh("Event 'new' on card #3"));
     }
 }
