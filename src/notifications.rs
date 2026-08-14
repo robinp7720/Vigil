@@ -163,6 +163,7 @@ impl NotificationManager {
                         item.actionable = false;
                         item.expires_at = None;
                     }
+                    clear_missing_image_paths(&mut value);
                     value
                 }
                 Ok(_) => {
@@ -236,7 +237,14 @@ impl NotificationManager {
             self.allocate_id()
         };
         let replacing = self.persisted.items.iter().any(|item| item.id == id);
+        let previous_image = self
+            .persisted
+            .items
+            .iter()
+            .find(|item| item.id == id)
+            .and_then(|item| item.image_path.clone());
         let image_path = self.resolve_image(id, &request.hints)?;
+        let image_changed = previous_image != image_path;
         let timeout_seconds = expiration_seconds(request.expire_timeout, urgency, &self.config);
         let actions = parse_actions(&request.actions);
         let notification = Notification {
@@ -265,6 +273,9 @@ impl NotificationManager {
         } else {
             self.persisted.items.insert(0, notification);
             self.persisted.unread_ids.insert(id);
+        }
+        if image_changed {
+            remove_cached_image(&self.cache_dir, previous_image.as_deref());
         }
         self.active_ids.insert(id);
         self.visible_ids.retain(|candidate| *candidate != id);
@@ -507,10 +518,48 @@ impl NotificationManager {
         }
         for key in ["image-path", "image_path"] {
             if let Some(path) = string_hint(hints, key).and_then(local_path) {
-                return Ok(Some(path));
+                return self.cache_external_image(id, &path);
             }
         }
         Ok(None)
+    }
+
+    fn cache_external_image(&self, id: u32, source: &Path) -> Result<Option<PathBuf>> {
+        let metadata = match fs::metadata(source) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error).context("failed to inspect notification image"),
+        };
+        if metadata.len() > u64::try_from(MAX_IMAGE_BYTES)? {
+            bail!("notification image exceeds the supported byte limit");
+        }
+
+        let image = image::ImageReader::open(source)
+            .context("failed to open notification image")?
+            .with_guessed_format()
+            .context("failed to detect notification image format")?
+            .decode()
+            .context("failed to decode notification image")?;
+        if image.width() > u32::try_from(MAX_IMAGE_DIMENSION)?
+            || image.height() > u32::try_from(MAX_IMAGE_DIMENSION)?
+        {
+            bail!("notification image exceeds the supported dimensions");
+        }
+
+        let path = self.cache_dir.join(format!("notification-{id}.png"));
+        let temporary = self.cache_dir.join(format!("notification-{id}.png.tmp"));
+        image
+            .save_with_format(&temporary, ImageFormat::Png)
+            .context("failed to encode notification image")?;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+        if let Err(error) = fs::rename(&temporary, &path) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error).context("failed to publish notification image");
+        }
+        Ok(Some(path))
     }
 
     fn cache_raw_image(
@@ -1104,6 +1153,14 @@ fn notification_cache_dir() -> Result<PathBuf> {
     Ok(base.join("vigil").join("notifications"))
 }
 
+fn clear_missing_image_paths(state: &mut PersistedState) {
+    for item in &mut state.items {
+        if item.image_path.as_ref().is_some_and(|path| !path.is_file()) {
+            item.image_path = None;
+        }
+    }
+}
+
 fn ensure_private_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
@@ -1161,6 +1218,18 @@ mod tests {
             hints: HashMap::new(),
             expire_timeout: -1,
         }
+    }
+
+    fn write_test_image(path: &Path) {
+        image::save_buffer_with_format(
+            path,
+            &[0x33, 0x66, 0x99, 0xff],
+            1,
+            1,
+            ColorType::Rgba8,
+            ImageFormat::Png,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1308,6 +1377,73 @@ mod tests {
                 & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn external_images_are_copied_and_only_owned_copies_are_removed() {
+        let (directory, mut manager) = manager(1_000);
+        let source = directory.path().join("source.png");
+        write_test_image(&source);
+        let mut image_request = request("Image");
+        image_request.hints.insert(
+            "image-path".to_string(),
+            OwnedValue::try_from(zbus::zvariant::Value::from(
+                source.to_string_lossy().to_string(),
+            ))
+            .unwrap(),
+        );
+
+        let id = manager.notify(image_request, 1_000).unwrap().0;
+        let cached = manager
+            .persisted
+            .items
+            .iter()
+            .find(|item| item.id == id)
+            .and_then(|item| item.image_path.clone())
+            .unwrap();
+
+        assert_ne!(cached, source);
+        assert_eq!(cached.parent(), Some(manager.cache_dir.as_path()));
+        assert!(cached.is_file());
+        manager.dismiss(id).unwrap();
+        assert!(source.is_file());
+        assert!(!cached.exists());
+    }
+
+    #[test]
+    fn replacement_without_an_image_removes_the_superseded_owned_copy() {
+        let (directory, mut manager) = manager(1_000);
+        let source = directory.path().join("source.png");
+        write_test_image(&source);
+        let mut first = request("Image");
+        first.hints.insert(
+            "image-path".to_string(),
+            OwnedValue::try_from(zbus::zvariant::Value::from(
+                source.to_string_lossy().to_string(),
+            ))
+            .unwrap(),
+        );
+        let id = manager.notify(first, 1_000).unwrap().0;
+        let cached = manager.persisted.items[0].image_path.clone().unwrap();
+
+        let mut replacement = request("No image");
+        replacement.replaces_id = id;
+        manager.notify(replacement, 1_001).unwrap();
+
+        assert!(source.is_file());
+        assert!(!cached.exists());
+        assert_eq!(manager.persisted.items[0].image_path, None);
+    }
+
+    #[test]
+    fn missing_historical_images_fall_back_to_the_app_icon() {
+        let (_directory, mut manager) = manager(1_000);
+        manager.notify(request("Missing"), 1_000).unwrap();
+        manager.persisted.items[0].image_path = Some(PathBuf::from("/missing/image.png"));
+
+        clear_missing_image_paths(&mut manager.persisted);
+
+        assert_eq!(manager.persisted.items[0].image_path, None);
     }
 
     #[test]

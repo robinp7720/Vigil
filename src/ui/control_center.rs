@@ -2274,7 +2274,7 @@ impl ControlCenterView {
             self.notification_list.append(&notification_row(
                 notification,
                 self.notification_control.as_ref(),
-                false,
+                NotificationPresentation::Inbox,
             ));
         }
     }
@@ -2466,12 +2466,33 @@ fn summary_tile(icon_name: &str, title: &str) -> (gtk::Button, gtk::Label) {
     (button, value)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum NotificationPresentation {
+    Toast { stack_width: u32 },
+    Inbox,
+}
+
 pub(super) fn notification_row(
     notification: &Notification,
     control: Option<&NotificationControl>,
-    compact: bool,
+    presentation: NotificationPresentation,
 ) -> gtk::Box {
-    let row = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let compact = matches!(presentation, NotificationPresentation::Toast { .. });
+    let attachment = notification_attachment(notification, presentation);
+    let has_avatar = attachment
+        .as_ref()
+        .is_some_and(|attachment| attachment.kind == NotificationImagePresentation::Avatar);
+    let has_media = attachment.as_ref().is_some_and(|attachment| {
+        matches!(
+            attachment.kind,
+            NotificationImagePresentation::WideMedia | NotificationImagePresentation::PortraitMedia
+        )
+    });
+    let expanded = has_media
+        || notification.progress.is_some()
+        || (notification.actionable && !notification.actions.is_empty());
+
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 7);
     row.add_css_class("notification-card");
     row.add_css_class(match notification.urgency {
         NotificationUrgency::Low => "urgency-low",
@@ -2492,6 +2513,20 @@ pub(super) fn notification_row(
             });
             row.add_controller(hover);
         }
+    } else {
+        row.add_css_class("notification-inbox-card");
+    }
+    if expanded {
+        row.add_css_class("notification-expanded");
+    }
+    if has_media {
+        row.add_css_class("has-media");
+    }
+    if notification.progress.is_some() {
+        row.add_css_class("has-progress");
+    }
+    if notification.actionable && !notification.actions.is_empty() {
+        row.add_css_class("has-actions");
     }
     row.set_accessible_role(gtk::AccessibleRole::Group);
     row.update_property(&[gtk::accessible::Property::Label(&format!(
@@ -2499,32 +2534,39 @@ pub(super) fn notification_row(
         notification.app_name, notification.summary
     ))]);
 
-    let attachment = notification_attachment(notification);
-    let has_avatar = attachment
-        .as_ref()
-        .is_some_and(|(_, presentation)| *presentation == NotificationImagePresentation::Avatar);
-    let copy = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let copy = gtk::Box::new(gtk::Orientation::Vertical, 4);
     copy.add_css_class("notification-copy");
     copy.set_hexpand(true);
 
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     if !has_avatar {
         let icon = notification_icon(notification);
-        icon.set_pixel_size(if compact { 28 } else { 34 });
+        icon.set_pixel_size(if compact { 22 } else { 28 });
         header.append(&icon);
     }
-    let app = gtk::Label::new(Some(&if notification.duplicate_count > 1 {
-        format!(
-            "{} · {} similar",
-            notification.app_name, notification.duplicate_count
-        )
-    } else {
-        notification.app_name.clone()
-    }));
+    let app = gtk::Label::new(Some(&notification.app_name));
     app.add_css_class("notification-app");
     app.set_xalign(0.0);
     app.set_hexpand(true);
+    app.set_ellipsize(gtk::pango::EllipsizeMode::End);
     header.append(&app);
+    if notification.duplicate_count > 1 {
+        let duplicate = gtk::Label::new(Some(&format!("×{}", notification.duplicate_count)));
+        duplicate.add_css_class("notification-duplicate");
+        duplicate.set_tooltip_text(Some(&format!(
+            "{} similar notifications",
+            notification.duplicate_count
+        )));
+        header.append(&duplicate);
+    }
+    if matches!(presentation, NotificationPresentation::Inbox) {
+        let age = gtk::Label::new(Some(&notification_age_label(
+            notification.received_at,
+            current_epoch_seconds(),
+        )));
+        age.add_css_class("notification-age");
+        header.append(&age);
+    }
     let dismiss = icon_button("window-close-symbolic", "Dismiss notification");
     dismiss.add_css_class("notification-dismiss");
     if let Some(control) = control.cloned() {
@@ -2543,6 +2585,8 @@ pub(super) fn notification_row(
     summary.set_xalign(0.0);
     summary.set_wrap(true);
     summary.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    summary.set_lines(if compact { 2 } else { 3 });
+    summary.set_ellipsize(gtk::pango::EllipsizeMode::End);
     copy.append(&summary);
 
     if !notification.body.is_empty() {
@@ -2551,7 +2595,11 @@ pub(super) fn notification_row(
         body.set_xalign(0.0);
         body.set_wrap(true);
         body.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-        body.set_lines(if compact { 4 } else { 8 });
+        body.set_lines(if compact {
+            if expanded { 3 } else { 2 }
+        } else {
+            8
+        });
         body.set_ellipsize(gtk::pango::EllipsizeMode::End);
         if gtk::pango::parse_markup(&notification.body, '\0').is_ok() {
             body.set_markup(&notification.body);
@@ -2580,14 +2628,11 @@ pub(super) fn notification_row(
         avatar_frame.set_halign(gtk::Align::Start);
         avatar_frame.set_valign(gtk::Align::Start);
         avatar_frame.set_overflow(gtk::Overflow::Hidden);
-        let avatar_size = if compact { 48 } else { 56 };
+        let avatar_size = if compact { 40 } else { 48 };
         avatar_frame.set_size_request(avatar_size, avatar_size);
-        if let Some((picture, _)) = attachment.as_ref() {
-            picture.add_css_class("notification-avatar");
-            picture.set_can_shrink(true);
-            picture.set_content_fit(gtk::ContentFit::Cover);
-            picture.set_size_request(avatar_size, avatar_size);
-            avatar_frame.append(picture);
+        if let Some(attachment) = attachment.as_ref() {
+            attachment.picture.add_css_class("notification-avatar");
+            avatar_frame.append(&attachment.picture);
         }
         main.append(&avatar_frame);
         main.append(&copy);
@@ -2596,15 +2641,14 @@ pub(super) fn notification_row(
         row.append(&copy);
     }
 
-    if let Some((picture, NotificationImagePresentation::Media)) = attachment {
-        picture.add_css_class("notification-image");
-        picture.set_can_shrink(true);
-        picture.set_content_fit(gtk::ContentFit::Cover);
-        picture.set_size_request(
-            if compact { 320 } else { 410 },
-            if compact { 140 } else { 180 },
-        );
-        row.append(&picture);
+    if let Some(attachment) = attachment.filter(|attachment| {
+        matches!(
+            attachment.kind,
+            NotificationImagePresentation::WideMedia | NotificationImagePresentation::PortraitMedia
+        )
+    }) {
+        attachment.picture.add_css_class("notification-image");
+        row.append(&attachment.picture);
     }
     if let Some(progress) = notification.progress {
         let progress_bar = gtk::ProgressBar::new();
@@ -2617,9 +2661,15 @@ pub(super) fn notification_row(
     if notification.actionable && !notification.actions.is_empty() {
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         actions.add_css_class("notification-actions");
+        actions.set_homogeneous(true);
         for action in notification.actions.iter().take(3) {
-            let button = gtk::Button::with_label(&action.label);
+            let button = gtk::Button::new();
             button.add_css_class("notification-action");
+            button.set_tooltip_text(Some(&action.label));
+            let label = gtk::Label::new(Some(&action.label));
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            label.set_max_width_chars(16);
+            button.set_child(Some(&label));
             if let Some(control) = control.cloned() {
                 let id = notification.id;
                 let key = action.key.clone();
@@ -2639,38 +2689,109 @@ pub(super) fn notification_row(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NotificationImagePresentation {
     Avatar,
-    Media,
+    WideMedia,
+    PortraitMedia,
+}
+
+struct NotificationAttachment {
+    picture: gtk::Picture,
+    kind: NotificationImagePresentation,
 }
 
 fn notification_attachment(
     notification: &Notification,
-) -> Option<(gtk::Picture, NotificationImagePresentation)> {
+    presentation: NotificationPresentation,
+) -> Option<NotificationAttachment> {
     let path = notification
         .image_path
         .as_ref()
         .filter(|path| path.is_file())?;
-    match gtk::gdk::Texture::from_filename(path) {
-        Ok(texture) => {
-            let presentation = notification_image_presentation(texture.width(), texture.height());
-            Some((gtk::Picture::for_paintable(&texture), presentation))
-        }
-        Err(_) => Some((
-            gtk::Picture::for_filename(path),
-            NotificationImagePresentation::Media,
-        )),
+    let image = image::open(path).ok()?;
+    let kind = notification_image_presentation(
+        i32::try_from(image.width()).ok()?,
+        i32::try_from(image.height()).ok()?,
+    );
+    if matches!(presentation, NotificationPresentation::Toast { .. })
+        && kind == NotificationImagePresentation::PortraitMedia
+    {
+        return None;
     }
+    let (width, height, cover) = match (presentation, kind) {
+        (NotificationPresentation::Toast { .. }, NotificationImagePresentation::Avatar) => {
+            (40, 40, true)
+        }
+        (NotificationPresentation::Inbox, NotificationImagePresentation::Avatar) => (48, 48, true),
+        (
+            NotificationPresentation::Toast { stack_width },
+            NotificationImagePresentation::WideMedia,
+        ) => {
+            let media_width = stack_width.saturating_sub(28).max(1);
+            (media_width, 120, true)
+        }
+        (NotificationPresentation::Inbox, NotificationImagePresentation::WideMedia) => {
+            (410, 180, true)
+        }
+        (NotificationPresentation::Inbox, NotificationImagePresentation::PortraitMedia) => {
+            (410, 180, false)
+        }
+        (NotificationPresentation::Toast { .. }, NotificationImagePresentation::PortraitMedia) => {
+            return None;
+        }
+    };
+    Some(NotificationAttachment {
+        picture: scaled_notification_picture(image, width, height, cover),
+        kind,
+    })
 }
 
 fn notification_image_presentation(width: i32, height: i32) -> NotificationImagePresentation {
     if width <= 0 || height <= 0 {
-        return NotificationImagePresentation::Media;
+        return NotificationImagePresentation::PortraitMedia;
     }
     let shorter = i64::from(width.min(height));
     let longer = i64::from(width.max(height));
     if shorter * 5 >= longer * 4 {
         NotificationImagePresentation::Avatar
+    } else if i64::from(width) * 10 >= i64::from(height) * 13 {
+        NotificationImagePresentation::WideMedia
     } else {
-        NotificationImagePresentation::Media
+        NotificationImagePresentation::PortraitMedia
+    }
+}
+
+fn scaled_notification_picture(
+    image: image::DynamicImage,
+    width: u32,
+    height: u32,
+    cover: bool,
+) -> gtk::Picture {
+    let rendered = if cover {
+        image.resize_to_fill(width, height, image::imageops::FilterType::Lanczos3)
+    } else {
+        image.thumbnail(width, height)
+    };
+    let rgba = rendered.into_rgba8();
+    let texture_width = i32::try_from(rgba.width()).unwrap_or(i32::MAX);
+    let texture_height = i32::try_from(rgba.height()).unwrap_or(i32::MAX);
+    let stride = usize::try_from(rgba.width()).unwrap_or_default() * 4;
+    let bytes = gtk::glib::Bytes::from_owned(rgba.into_raw());
+    let texture = gtk::gdk::MemoryTexture::new(
+        texture_width,
+        texture_height,
+        gtk::gdk::MemoryFormat::R8g8b8a8,
+        &bytes,
+        stride,
+    );
+    gtk::Picture::for_paintable(&texture)
+}
+
+fn notification_age_label(received_at: i64, now_epoch: i64) -> String {
+    let elapsed = now_epoch.saturating_sub(received_at).max(0);
+    match elapsed {
+        0..=59 => "now".to_string(),
+        60..=3_599 => format!("{}m", elapsed / 60),
+        3_600..=86_399 => format!("{}h", elapsed / 3_600),
+        _ => format!("{}d", elapsed / 86_400),
     }
 }
 
@@ -4855,8 +4976,8 @@ mod tests {
         ControlCenterMotionPhase, MetricLevel, NotificationImagePresentation, SliderDebounce,
         TimerActionState, TimerControlSpec, build_control_center_spec, control_center_origin,
         events_for_local_day, focus_from_origin, format_network_rate, live_percent_label,
-        metric_visual, notification_image_presentation, quick_grid_placements, timer_action_state,
-        volume_icon_name,
+        metric_visual, notification_age_label, notification_image_presentation,
+        quick_grid_placements, timer_action_state, volume_icon_name,
     };
 
     #[test]
@@ -4937,20 +5058,30 @@ mod tests {
                 "{width}x{height}"
             );
         }
-        for (width, height) in [
-            (1600, 900),
-            (900, 1600),
-            (79, 100),
-            (126, 100),
-            (0, 64),
-            (64, -1),
-        ] {
+        for (width, height) in [(1600, 900), (130, 100), (1920, 1080)] {
             assert_eq!(
                 notification_image_presentation(width, height),
-                NotificationImagePresentation::Media,
+                NotificationImagePresentation::WideMedia,
                 "{width}x{height}"
             );
         }
+        for (width, height) in [(900, 1600), (79, 100), (126, 100), (0, 64), (64, -1)] {
+            assert_eq!(
+                notification_image_presentation(width, height),
+                NotificationImagePresentation::PortraitMedia,
+                "{width}x{height}"
+            );
+        }
+    }
+
+    #[test]
+    fn notification_age_uses_compact_relative_buckets() {
+        assert_eq!(notification_age_label(1_000, 1_000), "now");
+        assert_eq!(notification_age_label(1_000, 1_059), "now");
+        assert_eq!(notification_age_label(1_000, 1_060), "1m");
+        assert_eq!(notification_age_label(1_000, 4_600), "1h");
+        assert_eq!(notification_age_label(1_000, 87_400), "1d");
+        assert_eq!(notification_age_label(2_000, 1_000), "now");
     }
 
     #[test]

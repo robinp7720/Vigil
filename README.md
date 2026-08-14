@@ -62,15 +62,17 @@ The calendar's weekday/month names follow the system locale by default; set `loc
 
 ## Native notifications
 
-Vigil owns `org.freedesktop.Notifications`. New notifications can take over the ambient center island, appear
-as a three-card toast stack on the focused output, and remain searchable in a
+Vigil owns `org.freedesktop.Notifications`. New notifications appear in a measured
+three-card stack below the bar on the focused output while the ambient center
+island keeps its current context. Notifications remain searchable in a richer
 seven-day/100-item inbox. Toast timeouts pause on hover; critical notifications
 remain visible until dismissed.
 
 Open the notification status button to mark the inbox read. Right-click it to
 toggle Do Not Disturb. DND queues low and normal notifications silently while
-letting critical alerts through. Images, progress, markup, hyperlinks, sounds,
-replacement IDs, and application actions are handled natively. State stays
+letting critical alerts through. Images are decoded into private manager-owned
+cache files; progress, markup, hyperlinks, sounds, replacement IDs, and up to
+three application actions are handled natively. State stays
 user-only under `${XDG_STATE_HOME:-~/.local/state}/vigil/notifications.json`;
 cached image data lives under `${XDG_CACHE_HOME:-~/.cache}/vigil/notifications`.
 Vigil intentionally starts with a clean history and does not import another

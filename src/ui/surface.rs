@@ -22,13 +22,16 @@ use super::context_card::{
     ContextAction, context_action, context_presentation, context_tier, media_playback_icon,
     warning_text,
 };
-use super::control_center::{ControlCenterFocus, ControlCenterView, notification_row};
+use super::control_center::{
+    ControlCenterFocus, ControlCenterView, NotificationPresentation, notification_row,
+};
 use super::popovers::PopoverCoordinator;
 use super::system::{SystemButtonSpec, SystemCluster, SystemModuleId, build_system_cluster};
 use super::wm::{WindowGroupSpec, select_primary_output, title_for_output, window_groups};
 
 const BAR_HEIGHT: i32 = 44;
 const SURFACE_MARGIN: i32 = 5;
+const NOTIFICATION_GAP: i32 = 10;
 const WORKSPACE_BUTTON_MIN_WIDTH: i32 = 32;
 const WORKSPACE_BUTTON_MIN_HEIGHT: i32 = 28;
 const CENTER_TEXT_MAX_CHARS: i32 = 56;
@@ -43,7 +46,6 @@ pub struct SurfaceSpec {
     pub warning: Option<WarningSpec>,
     pub suggestion: Option<Suggestion>,
     pub control_suggestions: Vec<Suggestion>,
-    pub notification: Option<Notification>,
     pub system: Option<SystemCluster>,
     pub clock_label: String,
     pub motion_style: MotionStyle,
@@ -109,9 +111,7 @@ impl RenderPlan {
             Some(previous) => Self {
                 workspaces: previous.workspaces != next.workspaces,
                 title: previous.title != next.title,
-                context: previous.context != next.context
-                    || previous.suggestion != next.suggestion
-                    || previous.notification != next.notification,
+                context: previous.context != next.context || previous.suggestion != next.suggestion,
                 warning: previous.warning != next.warning,
                 system: previous.system != next.system,
                 clock: previous.clock_label != next.clock_label,
@@ -163,17 +163,6 @@ fn surface_specs_with_suggestions(
             tier: ContextTier::Critical,
         });
     let primary_suggestion = bar_suggestion(selected_context.as_ref(), suggestions);
-    let primary_notification = snapshot
-        .system
-        .notifications
-        .items
-        .first()
-        .filter(|item| {
-            now_epoch.saturating_sub(item.received_at)
-                <= i64::try_from(config.notifications.preview_seconds).unwrap_or(i64::MAX)
-        })
-        .cloned();
-
     let mut specs = Vec::with_capacity(snapshot.outputs.len());
 
     if let Some(output) = snapshot.outputs.get(&primary_output) {
@@ -188,7 +177,6 @@ fn surface_specs_with_suggestions(
                 warning: None,
                 suggestion: primary_suggestion,
                 control_suggestions: suggestions.to_vec(),
-                notification: primary_notification,
                 motion_style: config.motion_style(),
                 ambient_motion: config.experience.ambient_motion,
             },
@@ -211,7 +199,6 @@ fn surface_specs_with_suggestions(
                 warning: reduced_warning.clone(),
                 suggestion: None,
                 control_suggestions: Vec::new(),
-                notification: None,
                 motion_style: config.motion_style(),
                 ambient_motion: config.experience.ambient_motion,
             },
@@ -229,7 +216,6 @@ struct SurfaceContent {
     warning: Option<WarningSpec>,
     suggestion: Option<Suggestion>,
     control_suggestions: Vec<Suggestion>,
-    notification: Option<Notification>,
     motion_style: MotionStyle,
     ambient_motion: AmbientMotion,
 }
@@ -261,7 +247,6 @@ fn spec_for_output(
         warning: content.warning,
         suggestion: content.suggestion,
         control_suggestions: content.control_suggestions,
-        notification: content.notification,
         system: content.system,
         clock_label: content.clock_label,
         motion_style: content.motion_style,
@@ -332,14 +317,16 @@ impl ManagedOverlay {
 
 type PopoverRegistry = Rc<RefCell<BTreeMap<String, ManagedOverlay>>>;
 
-struct ToastHandle {
+struct NotificationStackHandle {
     window: gtk::ApplicationWindow,
-    notification: Notification,
+    content: gtk::Box,
+    notifications: Vec<Notification>,
+    width: i32,
 }
 
 pub struct SurfaceRegistry {
     surfaces: BTreeMap<String, SurfaceHandle>,
-    toasts: BTreeMap<u32, ToastHandle>,
+    notification_stack: Option<NotificationStackHandle>,
     presentation_hidden: bool,
     calendar_sender: Option<Sender<CalendarMonthRequest>>,
     dismissals: Rc<RefCell<Dismissals>>,
@@ -358,7 +345,7 @@ impl SurfaceRegistry {
     pub fn new() -> Self {
         Self {
             surfaces: BTreeMap::new(),
-            toasts: BTreeMap::new(),
+            notification_stack: None,
             presentation_hidden: false,
             calendar_sender: None,
             dismissals: Rc::new(RefCell::new(Dismissals::default())),
@@ -386,7 +373,7 @@ impl SurfaceRegistry {
     ) -> Self {
         Self {
             surfaces: BTreeMap::new(),
-            toasts: BTreeMap::new(),
+            notification_stack: None,
             presentation_hidden: false,
             calendar_sender,
             dismissals: Rc::new(RefCell::new(Dismissals::default())),
@@ -421,23 +408,26 @@ impl SurfaceRegistry {
         snapshot: &BarSnapshot,
         monitors: &BTreeMap<String, gdk::Monitor>,
     ) {
-        let visible = snapshot
+        let notifications = snapshot
             .system
             .notifications
             .visible_ids
             .iter()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        let stale = self
-            .toasts
-            .keys()
-            .filter(|id| !visible.contains(id))
-            .copied()
+            .filter_map(|id| {
+                snapshot
+                    .system
+                    .notifications
+                    .items
+                    .iter()
+                    .find(|item| item.id == *id)
+                    .cloned()
+            })
             .collect::<Vec<_>>();
-        for id in stale {
-            if let Some(toast) = self.toasts.remove(&id) {
-                toast.window.close();
+        if notifications.is_empty() {
+            if let Some(stack) = self.notification_stack.take() {
+                stack.window.close();
             }
+            return;
         }
         let focused_output = snapshot
             .focused_output
@@ -447,63 +437,60 @@ impl SurfaceRegistry {
         let Some(focused_output) = focused_output else {
             return;
         };
-
-        for (index, id) in snapshot.system.notifications.visible_ids.iter().enumerate() {
-            let Some(notification) = snapshot
-                .system
-                .notifications
-                .items
-                .iter()
-                .find(|item| item.id == *id)
-                .cloned()
-            else {
-                continue;
-            };
-            if let Some(toast) = self.toasts.get_mut(id) {
-                toast.window.set_margin(Edge::Top, toast_margin(index));
-                if toast.notification != notification {
-                    toast.window.set_child(Some(&notification_row(
-                        &notification,
-                        self.notification_control.as_ref(),
-                        true,
-                    )));
-                    toast.notification = notification;
-                }
-                continue;
-            }
-            let Some(monitor) = monitors.get(focused_output) else {
-                continue;
-            };
+        let Some(monitor) = monitors.get(focused_output) else {
+            return;
+        };
+        let width = notification_stack_width(monitor.geometry().width());
+        if self.notification_stack.is_none() {
             let window = gtk::ApplicationWindow::builder()
                 .application(application)
-                .title("Vigil Notification")
+                .title("Vigil Notifications")
                 .build();
             window.set_decorated(false);
             window.set_resizable(false);
-            window.set_default_size(420, -1);
+            window.set_default_size(width, -1);
             window.add_css_class("notification-window");
             window.init_layer_shell();
             window.set_namespace(Some("vigil-notifications"));
             window.set_layer(Layer::Overlay);
             window.set_anchor(Edge::Top, true);
             window.set_anchor(Edge::Right, true);
-            window.set_margin(Edge::Top, toast_margin(index));
+            // Layer-shell positions overlays inside the work area reserved by the bar.
+            window.set_margin(Edge::Top, NOTIFICATION_GAP);
             window.set_margin(Edge::Right, 12);
             window.set_exclusive_zone(0);
             window.set_monitor(Some(monitor));
-            window.set_child(Some(&notification_row(
-                &notification,
-                self.notification_control.as_ref(),
-                true,
-            )));
+            let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
+            content.add_css_class("notification-stack");
+            window.set_child(Some(&content));
             window.present();
-            self.toasts.insert(
-                *id,
-                ToastHandle {
-                    window,
+            self.notification_stack = Some(NotificationStackHandle {
+                window,
+                content,
+                notifications: Vec::new(),
+                width,
+            });
+        }
+        let Some(stack) = self.notification_stack.as_mut() else {
+            return;
+        };
+        stack.window.set_monitor(Some(monitor));
+        stack.window.set_default_size(width, -1);
+        if stack.notifications != notifications || stack.width != width {
+            while let Some(child) = stack.content.first_child() {
+                stack.content.remove(&child);
+            }
+            for notification in &notifications {
+                stack.content.append(&notification_row(
                     notification,
-                },
-            );
+                    self.notification_control.as_ref(),
+                    NotificationPresentation::Toast {
+                        stack_width: u32::try_from(width).unwrap_or(400),
+                    },
+                ));
+            }
+            stack.notifications = notifications;
+            stack.width = width;
         }
     }
 
@@ -593,8 +580,8 @@ impl SurfaceRegistry {
         for (_, surface) in std::mem::take(&mut self.surfaces) {
             surface.close();
         }
-        for (_, toast) in std::mem::take(&mut self.toasts) {
-            toast.window.close();
+        if let Some(stack) = self.notification_stack.take() {
+            stack.window.close();
         }
     }
 
@@ -654,8 +641,8 @@ impl SurfaceRegistry {
     }
 }
 
-fn toast_margin(index: usize) -> i32 {
-    SURFACE_MARGIN + BAR_HEIGHT + 10 + i32::try_from(index).unwrap_or(i32::MAX) * 190
+fn notification_stack_width(monitor_width: i32) -> i32 {
+    monitor_width.saturating_sub(24).clamp(1, 400)
 }
 
 fn monitors_by_connector(display: &gdk::Display) -> BTreeMap<String, gdk::Monitor> {
@@ -1092,21 +1079,8 @@ impl PrimarySurface {
         }
 
         if plan.context {
-            let notification_visible = spec.notification.is_some()
-                && spec
-                    .context
-                    .as_ref()
-                    .is_none_or(|context| context.tier == ContextTier::Ambient);
-            *self.current_context.borrow_mut() = if notification_visible {
-                None
-            } else {
-                spec.context.clone()
-            };
-            *self.current_suggestion.borrow_mut() = if notification_visible {
-                None
-            } else {
-                spec.suggestion.clone()
-            };
+            *self.current_context.borrow_mut() = spec.context.clone();
+            *self.current_suggestion.borrow_mut() = spec.suggestion.clone();
             self.suggestion_action.remove_css_class("is-pending");
             self.suggestion_action.remove_css_class("is-success");
             self.suggestion_action.remove_css_class("is-failure");
@@ -1123,30 +1097,7 @@ impl PrimarySurface {
                 self.context_row.remove_css_class("proactive");
             }
 
-            self.context_row.remove_css_class("notification-preview");
-            if let Some(notification) = spec.notification.as_ref().filter(|_| notification_visible)
-            {
-                self.context_icon
-                    .set_icon_name(Some("preferences-system-notifications-symbolic"));
-                let text = if notification.body.is_empty() {
-                    format!("{} · {}", notification.app_name, notification.summary)
-                } else {
-                    format!(
-                        "{} · {} — {}",
-                        notification.app_name,
-                        notification.summary,
-                        notification.body.replace('\n', " ")
-                    )
-                };
-                self.context_label.set_label(&text);
-                set_context_accessibility(&self.context_row, &text);
-                clear_tier_classes(&self.context_row);
-                clear_context_motion_classes(&self.context_row);
-                self.context_row.add_css_class("notification-preview");
-                self.context_stack.set_visible_child_name("context");
-                self.context_media_controls.set_visible(false);
-                self.suggestion_revealer.set_reveal_child(false);
-            } else if let Some(context) = spec.context.as_ref() {
+            if let Some(context) = spec.context.as_ref() {
                 self.context_icon.set_icon_name(Some(&context.icon_name));
                 self.context_label.set_label(&context.text);
                 set_context_accessibility(&self.context_row, &context.text);
@@ -2607,7 +2558,6 @@ mod tests {
             warning: None,
             suggestion: None,
             control_suggestions: Vec::new(),
-            notification: None,
             system: None,
             clock_label: "12:00".to_string(),
             motion_style: crate::MotionStyle::Bold,
@@ -2629,6 +2579,15 @@ mod tests {
     fn bar_window_width_matches_monitor_width_minus_layer_margins() {
         assert_eq!(super::bar_window_width_for_monitor_width(3_840), 3_830);
         assert_eq!(super::bar_window_width_for_monitor_width(1), 1);
+    }
+
+    #[test]
+    fn notification_stack_width_is_compact_and_monitor_bounded() {
+        assert_eq!(super::notification_stack_width(3_840), 400);
+        assert_eq!(super::notification_stack_width(1_920), 400);
+        assert_eq!(super::notification_stack_width(360), 336);
+        assert_eq!(super::notification_stack_width(200), 176);
+        assert_eq!(super::notification_stack_width(20), 1);
     }
 
     #[test]
