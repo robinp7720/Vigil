@@ -17,6 +17,12 @@ pub struct WindowMenuItemSpec {
     pub focused: bool,
 }
 
+/// Pick the output that hosts the full bar.
+///
+/// The configured primary wins only while it actually exists; otherwise the
+/// first output is used. Falling back to the focused output is deliberately
+/// avoided: focus follows the mouse, so the primary/reduced roles would swap
+/// every time the cursor crosses a monitor and the bars would visibly jump.
 pub fn select_primary_output(snapshot: &BarSnapshot, config: &AppConfig) -> Option<String> {
     if let Some(primary_output) = config
         .primary_output
@@ -24,14 +30,6 @@ pub fn select_primary_output(snapshot: &BarSnapshot, config: &AppConfig) -> Opti
         .filter(|name| snapshot.outputs.contains_key(name.as_str()))
     {
         return Some(primary_output.clone());
-    }
-
-    if let Some(focused_output) = snapshot
-        .focused_output
-        .as_ref()
-        .filter(|name| snapshot.outputs.contains_key(name.as_str()))
-    {
-        return Some(focused_output.clone());
     }
 
     snapshot.outputs.keys().next().cloned()
@@ -169,9 +167,42 @@ fn window_title(window: &crate::WindowState) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::{BarSnapshot, OutputState, WindowState, WorkspaceState};
+    use crate::{AppConfig, BarSnapshot, OutputState, WindowState, WorkspaceState};
 
-    use super::window_groups;
+    use super::{select_primary_output, window_groups};
+
+    #[test]
+    fn primary_output_ignores_focus_and_missing_pins() {
+        let snapshot = BarSnapshot {
+            outputs: [
+                ("DP-2".to_string(), OutputState::default()),
+                ("DP-3".to_string(), OutputState::default()),
+            ]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>(),
+            focused_output: Some("DP-2".to_string()),
+            ..BarSnapshot::default()
+        };
+
+        let mut config = AppConfig::default();
+        config.primary_output = Some("DP-3".to_string());
+        assert_eq!(
+            select_primary_output(&snapshot, &config).as_deref(),
+            Some("DP-3")
+        );
+
+        // A stale pin must not make the full bar follow the mouse.
+        config.primary_output = Some("DP-5".to_string());
+        assert_eq!(
+            select_primary_output(&snapshot, &config),
+            Some("DP-2".to_string())
+        );
+
+        assert_eq!(
+            select_primary_output(&BarSnapshot::default(), &config),
+            None
+        );
+    }
 
     #[test]
     fn window_groups_include_current_windows_grouped_by_output_and_workspace() {
