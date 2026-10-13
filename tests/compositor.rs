@@ -1156,40 +1156,35 @@ fn compositor_hyprland_actions_use_direct_argv() {
                 "hyprctl".to_string(),
                 vec![
                     "dispatch".to_string(),
-                    "focusmonitor".to_string(),
-                    "DP-2".to_string()
+                    r#"hl.dsp.focus({ monitor = "DP-2" })"#.to_string()
                 ],
             ),
             (
                 "hyprctl".to_string(),
                 vec![
                     "dispatch".to_string(),
-                    "workspace".to_string(),
-                    "2".to_string()
+                    r#"hl.dsp.focus({ workspace = "2" })"#.to_string()
                 ],
             ),
             (
                 "hyprctl".to_string(),
                 vec![
                     "dispatch".to_string(),
-                    "focuswindow".to_string(),
-                    "address:0x12c".to_string(),
+                    r#"hl.dsp.focus({ window = "address:0x12c" })"#.to_string(),
                 ],
             ),
             (
                 "hyprctl".to_string(),
                 vec![
                     "dispatch".to_string(),
-                    "focusmonitor".to_string(),
-                    "DP-1".to_string()
+                    r#"hl.dsp.focus({ monitor = "DP-1" })"#.to_string()
                 ],
             ),
             (
                 "hyprctl".to_string(),
                 vec![
                     "dispatch".to_string(),
-                    "workspace".to_string(),
-                    "e+1".to_string()
+                    r#"hl.dsp.focus({ workspace = "e+1" })"#.to_string()
                 ],
             ),
             (

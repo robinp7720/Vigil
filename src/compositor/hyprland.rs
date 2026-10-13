@@ -97,19 +97,28 @@ impl CompositorAdapter for HyprlandAdapter {
             CompositorAction::SwitchWorkspace { output, workspace } => {
                 (self.command_runner)(
                     "hyprctl",
-                    &["dispatch".to_string(), "focusmonitor".to_string(), output],
+                    &[
+                        "dispatch".to_string(),
+                        format!("hl.dsp.focus({{ monitor = {output:?} }})"),
+                    ],
                     &self.command_env,
                 )?;
                 (self.command_runner)(
                     "hyprctl",
-                    &["dispatch".to_string(), "workspace".to_string(), workspace],
+                    &[
+                        "dispatch".to_string(),
+                        format!("hl.dsp.focus({{ workspace = {workspace:?} }})"),
+                    ],
                     &self.command_env,
                 )?;
             }
             CompositorAction::CycleWorkspace { output, direction } => {
                 (self.command_runner)(
                     "hyprctl",
-                    &["dispatch".to_string(), "focusmonitor".to_string(), output],
+                    &[
+                        "dispatch".to_string(),
+                        format!("hl.dsp.focus({{ monitor = {output:?} }})"),
+                    ],
                     &self.command_env,
                 )?;
                 let step = match direction {
@@ -120,8 +129,7 @@ impl CompositorAdapter for HyprlandAdapter {
                     "hyprctl",
                     &[
                         "dispatch".to_string(),
-                        "workspace".to_string(),
-                        step.to_string(),
+                        format!("hl.dsp.focus({{ workspace = {step:?} }})"),
                     ],
                     &self.command_env,
                 )?;
@@ -134,7 +142,10 @@ impl CompositorAdapter for HyprlandAdapter {
                 };
                 (self.command_runner)(
                     "hyprctl",
-                    &["dispatch".to_string(), "focuswindow".to_string(), window],
+                    &[
+                        "dispatch".to_string(),
+                        format!("hl.dsp.focus({{ window = {window:?} }})"),
+                    ],
                     &self.command_env,
                 )?;
             }

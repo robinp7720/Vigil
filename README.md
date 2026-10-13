@@ -125,3 +125,5 @@ systemctl --user restart vigil.service
 Vigil imports existing timers from
 `${XDG_STATE_HOME:-~/.local/state}/cockpit-bar/timers.json` when its own state
 file does not exist.
+
+Hyprland integration uses the native Lua IPC API (Hyprland 0.55+ with a Lua configuration).
