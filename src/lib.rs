@@ -102,6 +102,7 @@ pub fn run_test_control_server(requests: usize) -> Result<()> {
             ControlRequest::ContextGet { .. }
             | ControlRequest::ContextExecute { .. }
             | ControlRequest::ControlCenterOpen { .. }
+            | ControlRequest::ControlCenterToggle { .. }
             | ControlRequest::ControlCenterClose
             | ControlRequest::LockscreenGet
             | ControlRequest::NotificationsGet

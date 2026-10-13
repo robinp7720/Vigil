@@ -9,6 +9,8 @@ pub mod wm;
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{
@@ -66,6 +68,7 @@ struct UiRuntime {
     completion_rx: Receiver<ActionCompletion>,
     action_tx: Sender<ActionRequest>,
     control_rx: Receiver<UiControlRequest>,
+    control_wakeup: Option<UnixDatagram>,
     pending_control_actions: BTreeMap<String, Sender<ControlResponse>>,
     next_control_action_id: u64,
 }
@@ -370,6 +373,16 @@ fn install_ui_loop(
     let state = Rc::new(RefCell::new(runtime));
     let theme_provider = Rc::new(RefCell::new(None::<gtk::CssProvider>));
 
+    if let Some(wakeup) = state.borrow_mut().control_wakeup.take() {
+        let state = Rc::clone(&state);
+        glib::source::unix_fd_add_local(wakeup.as_raw_fd(), glib::IOCondition::IN, move |_, _| {
+            // Coalesce queued wakeups; requests remain in the typed channel.
+            while wakeup.recv(&mut [0; 64]).is_ok() {}
+            drain_control_requests(&mut state.borrow_mut());
+            glib::ControlFlow::Continue
+        });
+    }
+
     if let Some(display) = gtk::gdk::Display::default() {
         if let Err(error) = refresh_theme_provider(
             &display,
@@ -496,6 +509,9 @@ fn start_runtime(config: AppConfig, config_path: &Path) -> Result<(UiRuntime, Ru
     let cancelled = Arc::new(AtomicBool::new(false));
     let timer_store = Arc::new(Mutex::new(TimerStore::load(current_epoch())?));
     let (control_tx, control_rx) = mpsc::channel::<UiControlRequest>();
+    let (control_wakeup_rx, control_wakeup_tx) = UnixDatagram::pair()?;
+    control_wakeup_rx.set_nonblocking(true)?;
+    control_wakeup_tx.set_nonblocking(true)?;
     let (bluetooth, bluetooth_join) =
         spawn_bluetooth_source(state_tx.clone(), Arc::clone(&cancelled));
     let mut joins = vec![
@@ -530,6 +546,7 @@ fn start_runtime(config: AppConfig, config_path: &Path) -> Result<(UiRuntime, Ru
         Arc::clone(&cancelled),
         Arc::clone(&timer_store),
         control_tx,
+        control_wakeup_tx,
         notification_control.clone(),
     )?);
 
@@ -595,6 +612,7 @@ fn start_runtime(config: AppConfig, config_path: &Path) -> Result<(UiRuntime, Ru
             completion_rx,
             action_tx,
             control_rx,
+            control_wakeup: Some(control_wakeup_rx),
             pending_control_actions: BTreeMap::new(),
             next_control_action_id: 0,
         },
@@ -728,6 +746,7 @@ fn spawn_control_socket_server(
     cancelled: Arc<AtomicBool>,
     timer_store: Arc<Mutex<TimerStore>>,
     control_tx: Sender<UiControlRequest>,
+    control_wakeup: UnixDatagram,
     notification_control: Option<NotificationControl>,
 ) -> Result<JoinHandle<()>> {
     let socket = ControlSocket::bind()?;
@@ -735,21 +754,29 @@ fn spawn_control_socket_server(
 
     Ok(thread::spawn(move || {
         while !cancelled.load(Ordering::Relaxed) {
+            match socket.wait_for_request(CONTROL_SOCKET_POLL_INTERVAL) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    warn!("control socket wait failed: {error:#}");
+                    if !wait_for_cancellation(&cancelled, CONTROL_SOCKET_POLL_INTERVAL) {
+                        break;
+                    }
+                    continue;
+                }
+            }
             match socket.try_serve_once(|request| {
                 handle_control_request(
                     request,
                     &sender,
                     &timer_store,
                     &control_tx,
+                    &control_wakeup,
                     notification_control.as_ref(),
                 )
             }) {
                 Ok(true) => {}
-                Ok(false) => {
-                    if !wait_for_cancellation(&cancelled, CONTROL_SOCKET_POLL_INTERVAL) {
-                        break;
-                    }
-                }
+                Ok(false) => {}
                 Err(error) => {
                     warn!("control socket error: {error:#}");
                     if !wait_for_cancellation(&cancelled, CONTROL_SOCKET_POLL_INTERVAL) {
@@ -766,6 +793,7 @@ fn handle_control_request(
     sender: &Sender<StateUpdate>,
     timer_store: &Arc<Mutex<TimerStore>>,
     control_tx: &Sender<UiControlRequest>,
+    control_wakeup: &UnixDatagram,
     notification_control: Option<&NotificationControl>,
 ) -> Result<ControlResponse> {
     match request {
@@ -845,6 +873,7 @@ fn handle_control_request(
         request @ (ControlRequest::ContextGet { .. }
         | ControlRequest::ContextExecute { .. }
         | ControlRequest::ControlCenterOpen { .. }
+        | ControlRequest::ControlCenterToggle { .. }
         | ControlRequest::ControlCenterClose
         | ControlRequest::LockscreenGet
         | ControlRequest::PresentationGet
@@ -856,6 +885,8 @@ fn handle_control_request(
                     response_tx,
                 })
                 .map_err(|_| anyhow!("bar UI is unavailable"))?;
+            // A full wakeup socket already has a readable notification queued.
+            let _ = control_wakeup.send(&[1]);
             response_rx
                 .recv_timeout(CONTROL_UI_RESPONSE_TIMEOUT)
                 .map_err(|_| anyhow!("bar UI did not answer the integration request"))
@@ -913,6 +944,20 @@ fn drain_control_requests(runtime: &mut UiRuntime) {
                     .registry
                     .open_control_center(context, output.as_deref().or(focused_output.as_deref()));
                 let _ = request.response_tx.send(if opened {
+                    ControlResponse::Accepted
+                } else {
+                    ControlResponse::Error {
+                        message: "the primary quick-settings surface is unavailable".to_string(),
+                    }
+                });
+            }
+            ControlRequest::ControlCenterToggle { context, output } => {
+                let focused_output = runtime.store.snapshot().focused_output.clone();
+                let toggled = runtime.registry.toggle_control_center(
+                    context,
+                    output.as_deref().or(focused_output.as_deref()),
+                );
+                let _ = request.response_tx.send(if toggled {
                     ControlResponse::Accepted
                 } else {
                     ControlResponse::Error {

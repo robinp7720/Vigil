@@ -115,6 +115,9 @@ impl<B: ActionBackend> ActionRouter<B> {
             ActionIntent::SelectKeyboardLayout { index } => self
                 .backend
                 .execute_compositor(CompositorAction::SelectKeyboardLayout { index }),
+            ActionIntent::OpenLauncher { output } => self
+                .backend
+                .launch_process(ProcessSpec::new("Luma", ["--toggle", "--output", &output])),
             ActionIntent::OpenWindowSearch { output } => {
                 self.backend.launch_process(luma_window_process(&output))
             }
@@ -330,11 +333,31 @@ fn run_process(spec: ProcessSpec) -> Result<()> {
 }
 
 fn spawn_process(spec: ProcessSpec) -> Result<()> {
-    Command::new(&spec.program)
+    let spec = application_process(spec, std::env::var_os("INVOCATION_ID").is_some());
+    let mut child = Command::new(&spec.program)
         .args(&spec.args)
         .spawn()
         .with_context(|| format!("failed to spawn {}", spec.display()))?;
+    // A bar outlives the launchers it opens. Reap each child without blocking
+    // the action worker while an application remains open.
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
+}
+
+fn application_process(spec: ProcessSpec, supervised: bool) -> ProcessSpec {
+    if !supervised {
+        return spec;
+    }
+    // A separate scope inherits the live Wayland environment while keeping
+    // launched applications outside vigil.service's restart/stop kill group.
+    let mut args = ["--user", "--scope", "--quiet", "--collect", "--"]
+        .map(str::to_string)
+        .to_vec();
+    args.push(spec.program);
+    args.extend(spec.args);
+    ProcessSpec::new("systemd-run", args)
 }
 
 fn luma_window_process(output: &str) -> ProcessSpec {
@@ -509,6 +532,31 @@ mod tests {
     };
 
     use super::{default_sink_process, move_sink_input_process};
+
+    #[test]
+    fn supervised_applications_leave_the_bars_lifetime_without_shell_quoting() {
+        let original =
+            super::ProcessSpec::new("Luma", ["--query", "a title with spaces; $literal"]);
+        assert_eq!(
+            super::application_process(original.clone(), false),
+            original
+        );
+        let scoped = super::application_process(original, true);
+        assert_eq!(scoped.program, "systemd-run");
+        assert_eq!(
+            scoped.args,
+            [
+                "--user",
+                "--scope",
+                "--quiet",
+                "--collect",
+                "--",
+                "Luma",
+                "--query",
+                "a title with spaces; $literal"
+            ]
+        );
+    }
 
     #[test]
     fn workspace_click_routes_to_compositor_backend() {

@@ -643,6 +643,9 @@ pub enum ActionIntent {
     SelectKeyboardLayout {
         index: u8,
     },
+    OpenLauncher {
+        output: String,
+    },
     OpenWindowSearch {
         output: String,
     },

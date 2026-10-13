@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -50,6 +51,10 @@ pub enum ControlRequest {
         action: ContextAction,
     },
     ControlCenterOpen {
+        context: DesktopContext,
+        output: Option<String>,
+    },
+    ControlCenterToggle {
         context: DesktopContext,
         output: Option<String>,
     },
@@ -208,6 +213,35 @@ impl ControlSocket {
                 self.socket_path.display()
             )
         })
+    }
+
+    /// Sleep until a client arrives, while bounding shutdown latency.
+    pub fn wait_for_request(&self, timeout: Duration) -> Result<bool> {
+        let mut descriptor = libc::pollfd {
+            fd: self.listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: descriptor points to one initialized pollfd; the listener
+        // remains owned by self for the entire call.
+        let ready = unsafe {
+            libc::poll(
+                &mut descriptor,
+                1,
+                timeout.as_millis().min(i32::MAX as u128) as i32,
+            )
+        };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                return Ok(false);
+            }
+            return Err(error).context("failed to wait for control connection");
+        }
+        if descriptor.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            bail!("control listener became unavailable");
+        }
+        Ok(descriptor.revents & libc::POLLIN != 0)
     }
 
     pub fn serve_once<F>(&self, handler: F) -> Result<()>
@@ -466,6 +500,20 @@ mod tests {
     }
 
     #[test]
+    fn control_center_toggle_carries_page_and_output() {
+        let request = ControlRequest::ControlCenterToggle {
+            context: DesktopContext::Notifications,
+            output: Some("DP-2".to_string()),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ControlRequest>(&json).unwrap(),
+            request
+        );
+        assert!(json.contains("control_center_toggle"));
+    }
+
+    #[test]
     fn lockscreen_protocol_has_read_only_stable_tags() {
         assert_eq!(
             serde_json::to_string(&ControlRequest::LockscreenGet).expect("serialize request"),
@@ -624,6 +672,25 @@ mod tests {
         server.join().expect("join stalled server");
 
         assert!(!result.expect("nonblocking stalled serve result"));
+    }
+
+    #[test]
+    fn listener_wakes_for_a_client_and_returns_to_idle_after_serving() {
+        let runtime_dir = TempDir::new("ipc-readiness");
+        let socket =
+            ControlSocket::bind_at(runtime_dir.path().join("vigil.sock")).expect("bind socket");
+        socket.set_nonblocking(true).expect("nonblocking listener");
+        assert!(!socket.wait_for_request(Duration::ZERO).expect("idle"));
+        let mut client = UnixStream::connect(socket.local_path()).expect("connect");
+        super::write_json_line(&mut client, &ControlRequest::ControlCenterClose)
+            .expect("write request");
+        assert!(socket.wait_for_request(Duration::ZERO).expect("ready"));
+        assert!(
+            socket
+                .try_serve_once(|_| Ok(ControlResponse::Accepted))
+                .expect("serve")
+        );
+        assert!(!socket.wait_for_request(Duration::ZERO).expect("idle again"));
     }
 
     struct TempDir {

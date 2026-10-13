@@ -95,6 +95,12 @@ enum LockscreenCommand {
 
 #[derive(Debug, clap::Subcommand)]
 enum ControlCenterCommand {
+    Toggle {
+        #[arg(long, default_value = "overview", value_parser = parse_desktop_context)]
+        context: vigil::DesktopContext,
+        #[arg(long)]
+        output: Option<String>,
+    },
     Open {
         #[arg(long, default_value = "overview", value_parser = parse_desktop_context)]
         context: vigil::DesktopContext,
@@ -148,6 +154,9 @@ fn run_cli(cli: Cli) -> Result<()> {
             let request = match command {
                 ControlCenterCommand::Open { context, output } => {
                     vigil::ControlRequest::ControlCenterOpen { context, output }
+                }
+                ControlCenterCommand::Toggle { context, output } => {
+                    vigil::ControlRequest::ControlCenterToggle { context, output }
                 }
                 ControlCenterCommand::Close => vigil::ControlRequest::ControlCenterClose,
             };

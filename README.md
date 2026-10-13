@@ -38,6 +38,7 @@ The lockscreen uses two deliberately narrow IPC commands:
 
 ```bash
 vigil control-center open
+vigil control-center toggle
 vigil control-center open --context notifications --output DP-5
 vigil control-center close
 vigil lockscreen snapshot
@@ -45,6 +46,13 @@ vigil lockscreen snapshot
 
 When no output is supplied, the control center opens on the currently focused
 output. A single quick-settings window is retargeted between outputs.
+`toggle` dismisses a visible panel on the same output; a specific `--context`
+switches to that page first if needed. Another output retargets the panel.
+Every bar also has a desktop-search button:
+left-click opens Luma on that output, and right-click opens window search.
+When supervised by systemd, launched applications get independent user scopes
+with the current Wayland environment. They survive a Vigil restart, and exited
+launcher processes are reaped without blocking the desktop controls.
 
 The snapshot contains only an active timer label and remaining duration,
 network and power summaries, and the unread-notification count. It never

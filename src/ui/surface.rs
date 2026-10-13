@@ -632,6 +632,33 @@ impl SurfaceRegistry {
         true
     }
 
+    pub fn toggle_control_center(
+        &self,
+        context: DesktopContext,
+        requested_output: Option<&str>,
+    ) -> bool {
+        for surface in self.surfaces.values() {
+            if let SurfaceHandle::Primary(surface) = surface {
+                let center = &surface.control_center;
+                let connector = center
+                    .window()
+                    .monitor()
+                    .and_then(|monitor| monitor.connector());
+                let same_output =
+                    requested_output.is_none_or(|output| connector.as_deref() == Some(output));
+                if center.is_visible()
+                    && same_output
+                    && (context == DesktopContext::Overview
+                        || center.current_page() == context.into())
+                {
+                    center.dismiss();
+                    return true;
+                }
+            }
+        }
+        self.open_control_center(context, requested_output)
+    }
+
     pub fn close_control_center(&self) {
         for surface in self.surfaces.values() {
             if let SurfaceHandle::Primary(surface) = surface {
@@ -792,6 +819,12 @@ impl PrimarySurface {
         center_slot.set_hexpand(false);
         right.set_halign(gtk::Align::End);
 
+        left.append(&launcher_button(
+            action_sender.clone(),
+            spec.output_name.clone(),
+            popover_coordinator.clone(),
+            popover_registry.clone(),
+        ));
         let workspaces = WorkspaceStrip::new(action_sender.clone(), spec.output_name.clone());
         left.append(workspaces.widget());
         let app_label = gtk::Label::new(None);
@@ -1252,6 +1285,12 @@ impl ReducedSurface {
         right.add_css_class("reduced-status-island");
         right.set_halign(gtk::Align::End);
 
+        left.append(&launcher_button(
+            action_sender.clone(),
+            spec.output_name.clone(),
+            popover_coordinator.clone(),
+            popover_registry.clone(),
+        ));
         let workspaces = WorkspaceStrip::new(action_sender.clone(), spec.output_name.clone());
         left.append(workspaces.widget());
         let app_label = gtk::Label::new(None);
@@ -1521,6 +1560,47 @@ fn install_workspace_scroll(
     container.add_controller(scroll);
 }
 
+fn launcher_button(
+    action_sender: Sender<ActionRequest>,
+    output_name: String,
+    coordinator: Rc<RefCell<PopoverCoordinator>>,
+    registry: PopoverRegistry,
+) -> gtk::Button {
+    let button = icon_button(
+        "system-search-symbolic",
+        "Search apps, files and actions · Super+Space\nRight-click for windows · Super+Tab",
+    );
+    button.add_css_class("launcher-button");
+    button.update_property(&[gtk::accessible::Property::Label("Open desktop search")]);
+    let sender = action_sender.clone();
+    let output = output_name.clone();
+    let click_coordinator = coordinator.clone();
+    let click_registry = registry.clone();
+    button.connect_clicked(move |_| {
+        popdown_active_popover(&click_coordinator, &click_registry);
+        let _ = sender.send(ActionRequest {
+            origin: format!("launcher:{output}"),
+            intent: ActionIntent::OpenLauncher {
+                output: output.clone(),
+            },
+        });
+    });
+    let secondary = gtk::GestureClick::new();
+    secondary.set_button(3);
+    secondary.connect_pressed(move |gesture, _, _, _| {
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        popdown_active_popover(&coordinator, &registry);
+        let _ = action_sender.send(ActionRequest {
+            origin: format!("launcher-windows:{output_name}"),
+            intent: ActionIntent::OpenWindowSearch {
+                output: output_name.clone(),
+            },
+        });
+    });
+    button.add_controller(secondary);
+    button
+}
+
 fn install_title_interactions(
     button: &gtk::Button,
     groups: Rc<RefCell<Vec<WindowGroupSpec>>>,
@@ -1529,6 +1609,7 @@ fn install_title_interactions(
     coordinator: Rc<RefCell<PopoverCoordinator>>,
     registry: PopoverRegistry,
 ) {
+    button.set_tooltip_text(Some("Open windows · Right-click to search · Super+Tab"));
     let popover = gtk::Popover::new();
     popover.set_has_arrow(false);
     popover.set_parent(button);
