@@ -3,6 +3,7 @@ mod artwork;
 pub mod context_card;
 pub mod control_center;
 mod morph;
+mod morph_bin;
 pub mod popovers;
 mod stage;
 pub mod surface;
