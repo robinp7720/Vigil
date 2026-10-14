@@ -68,6 +68,23 @@ available to the urgency card and lock screen.
 The calendar's weekday/month names follow the system locale by default; set `locale` in
 `config.toml` (e.g. `locale = "de_DE.UTF-8"`) to override it independently of the environment.
 
+## Motion
+
+The center island, quick settings, its detail pages, and notification toasts morph on
+springs instead of crossfading or sliding. `experience.motion = "bold"` allows a slight
+overshoot; `"calm"` settles without one. Quick settings grows out of the bar item that
+opened it and collapses back into it; overview tiles expand into their detail pages.
+`vigil control-center toggle` and `open` without a button origin morph from the right
+status cluster on the primary output, or from a centered scale on other outputs.
+Interrupting a morph reverses it from the shape on screen. Disabling GTK animations
+(`gtk-enable-animations=false`) makes every change instant, and
+`vigil control-center close` always hides immediately so nothing lingers above the lock
+screen. Quick settings and toasts use transparent full-height overlay surfaces whose
+input region follows the visible shapes, so clicks beside them reach the windows
+underneath. Quick settings also closes on a press outside the panel; Hyprland gives
+pointer focus to a newly mapped overlay, so this keeps a still-pointer click from
+being swallowed.
+
 ## AI token usage
 
 The `ai_usage` module shows today's combined Codex and Claude Code token count on
@@ -105,9 +122,10 @@ environment of `vigil.service` as well as any interactive shell.
 
 ## Native notifications
 
-Vigil owns `org.freedesktop.Notifications`. New notifications appear in a measured
-three-card stack below the bar on the focused output while the ambient center
-island keeps its current context. Notifications remain searchable in a richer
+Vigil owns `org.freedesktop.Notifications`. New notifications grow out of the
+center island into a measured three-card stack at the top center of the focused
+output while the island keeps its current context. Outputs without a center
+island grow toasts from a top-center pill. Notifications remain searchable in a richer
 seven-day/100-item inbox. Toast timeouts pause on hover; critical notifications
 remain visible until dismissed.
 
