@@ -26,12 +26,10 @@ use super::control_center::{
     ControlCenterFocus, ControlCenterView, NotificationPresentation, notification_row,
 };
 use super::popovers::PopoverCoordinator;
+use super::stage::{BAR_HEIGHT, NOTIFICATION_GAP, SURFACE_MARGIN};
 use super::system::{SystemButtonSpec, SystemCluster, SystemModuleId, build_system_cluster};
 use super::wm::{WindowGroupSpec, select_primary_output, title_for_output, window_groups};
 
-const BAR_HEIGHT: i32 = 44;
-const SURFACE_MARGIN: i32 = 5;
-const NOTIFICATION_GAP: i32 = 10;
 const WORKSPACE_BUTTON_MIN_WIDTH: i32 = 32;
 const WORKSPACE_BUTTON_MIN_HEIGHT: i32 = 28;
 const CENTER_TEXT_MAX_CHARS: i32 = 56;

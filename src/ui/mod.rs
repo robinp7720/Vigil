@@ -4,6 +4,7 @@ pub mod context_card;
 pub mod control_center;
 mod morph;
 pub mod popovers;
+mod stage;
 pub mod surface;
 pub mod system;
 pub mod theme;
