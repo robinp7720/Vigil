@@ -51,6 +51,24 @@ fn params() -> SpringParams {
     SpringParams::for_style(morph::motion_style())
 }
 
+/// Width the child's height is measured for. Unconstrained probes (`for_size < 0`) after the
+/// first allocation use the width the child is actually allocated at, so the height spring
+/// tracks the real layout. `follow_width` carries the child's (minimum, natural) width when
+/// the bin lets the child exceed its own width.
+fn child_measure_width(for_size: i32, allocated: i32, follow_width: Option<(i32, i32)>) -> i32 {
+    let base = if for_size >= 0 {
+        for_size
+    } else if allocated > 0 {
+        allocated
+    } else {
+        return -1;
+    };
+    match follow_width {
+        Some((min_w, nat_w)) => nat_w.max(base).max(min_w),
+        None => base,
+    }
+}
+
 fn to_graphene(rect: MorphRect) -> graphene::Rect {
     graphene::Rect::new(rect.x, rect.y, rect.width, rect.height)
 }
@@ -107,11 +125,20 @@ mod imp {
             // The child is allocated at `max(natural, bin width)` when following width and
             // at the bin width otherwise (see `size_allocate`); measure its height for
             // that same width so measure and allocate agree.
-            let child_for = if !horizontal && for_size >= 0 && self.follow_width.get() {
-                let (min_w, nat_w, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
-                nat_w.max(for_size).max(min_w)
-            } else {
+            let allocated = self.obj().width();
+            let child_for = if horizontal {
                 for_size
+            } else {
+                let (min_w, nat_w, _, _) = if self.follow_width.get() {
+                    child.measure(gtk::Orientation::Horizontal, -1)
+                } else {
+                    (0, 0, -1, -1)
+                };
+                child_measure_width(
+                    for_size,
+                    allocated,
+                    self.follow_width.get().then_some((min_w, nat_w)),
+                )
             };
             let (minimum, natural, _, _) = child.measure(orientation, child_for);
             let follows = if horizontal {
@@ -126,8 +153,7 @@ mod imp {
             // (the bin's current width) drives the height spring; other `for_size` probes
             // would flip the target. Before the first allocation only the unconstrained
             // measure is available.
-            let allocated = self.obj().width();
-            let tracks = horizontal || for_size == allocated || (allocated == 0 && for_size < 0);
+            let tracks = horizontal || for_size < 0 || for_size == allocated;
             let slot = if horizontal {
                 &self.width
             } else {
@@ -705,4 +731,26 @@ fn imp_with_cleared_callback(bin: &MorphBin) -> &imp::MorphBin {
     let imp = bin.imp();
     imp.settled.take();
     imp
+}
+
+#[cfg(test)]
+mod measure_width_tests {
+    use super::child_measure_width;
+
+    #[test]
+    fn unconstrained_probe_uses_allocated_width() {
+        assert_eq!(child_measure_width(-1, 480, None), 480);
+        assert_eq!(child_measure_width(-1, 0, None), -1);
+    }
+
+    #[test]
+    fn constrained_probe_keeps_for_size() {
+        assert_eq!(child_measure_width(300, 480, None), 300);
+    }
+
+    #[test]
+    fn following_width_never_below_natural() {
+        assert_eq!(child_measure_width(100, 480, Some((50, 433))), 433);
+        assert_eq!(child_measure_width(-1, 0, Some((50, 433))), -1);
+    }
 }
