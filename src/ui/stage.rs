@@ -59,6 +59,19 @@ pub fn origin_stage_width(requested: i32, allocated: Option<i32>) -> i32 {
         .map_or(requested, |width| width.max(requested))
 }
 
+/// Clips a toast's input shape to the stage area below the bar, so the stage never takes
+/// input over the island while a toast morphs out of or back into it.
+pub fn toast_input_shape(shape: MorphRect) -> Option<MorphRect> {
+    let top = toast_top_in_stage() as f32;
+    let bottom = shape.y + shape.height;
+    shape.intersection(MorphRect::new(
+        shape.x,
+        top,
+        shape.width,
+        (bottom - top).max(0.0),
+    ))
+}
+
 /// A stage anchored top-right with `SURFACE_MARGIN` margins.
 pub fn monitor_to_top_right_stage(
     rect: MorphRect,
@@ -169,6 +182,22 @@ mod tests {
         assert_eq!(origin_stage_width(512, Some(640)), 640);
         // A just-grown request wins over the stale, narrower allocation.
         assert_eq!(origin_stage_width(800, Some(512)), 800);
+    }
+
+    #[test]
+    fn toast_input_stays_below_the_bar() {
+        let top = toast_top_in_stage() as f32;
+        let arriving = MorphRect::new(0.0, 4.0, 400.0, 80.0);
+        assert_eq!(
+            toast_input_shape(arriving),
+            Some(MorphRect::new(0.0, top, 400.0, 84.0 - top))
+        );
+        assert_eq!(
+            toast_input_shape(MorphRect::new(0.0, 4.0, 160.0, 36.0)),
+            None
+        );
+        let settled = MorphRect::new(0.0, top, 400.0, 90.0);
+        assert_eq!(toast_input_shape(settled), Some(settled));
     }
 
     #[test]

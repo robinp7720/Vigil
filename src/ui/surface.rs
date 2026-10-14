@@ -840,8 +840,8 @@ fn new_notification_stack(
     window.init_layer_shell();
     window.set_namespace(Some("vigil-notifications"));
     window.set_layer(Layer::Overlay);
-    // Anchored to the top only: the window is as tall as the stack (plus room above it
-    // for the morph out of the island) so it never covers more than the cards.
+    // A transparent, full-height stage centered under the island: toasts morph out of
+    // the island within it, and the input region covers only the cards below the bar.
     window.set_anchor(Edge::Top, true);
     window.set_anchor(Edge::Bottom, true);
     window.set_margin(Edge::Top, SURFACE_MARGIN);
@@ -866,7 +866,7 @@ fn new_notification_stack(
             let mut child = content.first_child();
             while let Some(widget) = child {
                 if let Some(morph) = widget.downcast_ref::<MorphBin>()
-                    && let Some(shape) = morph.shape_in(&window)
+                    && let Some(shape) = morph.shape_in(&window).and_then(stage::toast_input_shape)
                 {
                     shapes.push(shape);
                 }
@@ -905,12 +905,17 @@ fn remove_toast(stack: &NotificationStackHandle, id: u32, origin: MorphRect, ani
     let Some(row) = stack.rows.borrow_mut().remove(&id) else {
         return;
     };
-    let content = stack.content.clone();
+    // Weak captures: `finish` lives in the morph's settled callbacks, so strong ones
+    // would keep the morph and the stack content alive through a cycle.
+    let content = stack.content.downgrade();
     let window = stack.window.downgrade();
     let morph = row.morph;
     let finish = {
-        let morph = morph.clone();
+        let morph = morph.downgrade();
         move || {
+            let (Some(content), Some(morph)) = (content.upgrade(), morph.upgrade()) else {
+                return;
+            };
             content.remove(&morph);
             if content.first_child().is_none()
                 && let Some(window) = window.upgrade()
