@@ -24,6 +24,9 @@ use super::ai_usage::AiUsageView;
 use super::artwork::{
     ArtworkRequest, prefer_artwork_candidate, result_is_current, spawn_artwork_loader,
 };
+use super::morph::MorphRect;
+use super::morph_bin::{MorphBin, MorphOrigin, MorphShadow};
+use super::stage;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ControlCenterFocus {
@@ -1092,8 +1095,6 @@ struct AgendaRenderKey {
 
 const METRIC_SEGMENTS: usize = 10;
 const NETWORK_GRAPH_SAMPLES: usize = 60;
-const CONTROL_CENTER_ENTER_MS: u64 = 320;
-const CONTROL_CENTER_EXIT_MS: u64 = 180;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ControlCenterMotionPhase {
@@ -1130,120 +1131,119 @@ impl ControlCenterMotionPhase {
 struct ControlCenterMotion {
     window: glib::WeakRef<gtk::ApplicationWindow>,
     root: glib::WeakRef<gtk::Box>,
+    panel: glib::WeakRef<MorphBin>,
     phase: Cell<ControlCenterMotionPhase>,
-    generation: Cell<u64>,
+    origin: Cell<MorphOrigin>,
 }
 
 impl ControlCenterMotion {
-    fn new(window: &gtk::ApplicationWindow, root: &gtk::Box) -> Self {
+    fn new(window: &gtk::ApplicationWindow, root: &gtk::Box, panel: &MorphBin) -> Self {
         Self {
             window: window.downgrade(),
             root: root.downgrade(),
+            panel: panel.downgrade(),
             phase: Cell::new(ControlCenterMotionPhase::Hidden),
-            generation: Cell::new(0),
+            origin: Cell::new(MorphOrigin::Scaled(0.92)),
         }
     }
 
-    fn present(self: &Rc<Self>) {
+    fn present(self: &Rc<Self>, origin: MorphOrigin) {
         let current = self.phase.get();
         let next = current.transition(ControlCenterMotionEvent::Present);
         if next == current {
             return;
         }
-
-        let Some(window) = self.window.upgrade() else {
+        let (Some(window), Some(root), Some(panel)) = (
+            self.window.upgrade(),
+            self.root.upgrade(),
+            self.panel.upgrade(),
+        ) else {
             return;
         };
-        let Some(root) = self.root.upgrade() else {
-            return;
-        };
-
-        let generation = self.advance_generation();
         root.set_sensitive(true);
-        root.remove_css_class("control-center-exiting");
-        root.remove_css_class("control-center-entering");
-
+        self.origin.set(origin);
         if !animations_enabled() {
+            panel.cancel();
             self.phase.set(ControlCenterMotionPhase::Visible);
             window.present();
             return;
         }
-
         self.phase.set(next);
-        root.add_css_class("control-center-entering");
         window.present();
-
+        panel.expand_from(origin, false, || {});
         let motion = Rc::downgrade(self);
-        glib::timeout_add_local_once(Duration::from_millis(CONTROL_CENTER_ENTER_MS), move || {
-            let Some(motion) = motion.upgrade() else {
-                return;
-            };
-            if motion.generation.get() != generation {
-                return;
+        panel.on_settled(move || {
+            if let Some(motion) = motion.upgrade() {
+                motion.phase.set(
+                    motion
+                        .phase
+                        .get()
+                        .transition(ControlCenterMotionEvent::Entered),
+                );
             }
-            if let Some(root) = motion.root.upgrade() {
-                root.remove_css_class("control-center-entering");
-            }
-            motion.phase.set(
-                motion
-                    .phase
-                    .get()
-                    .transition(ControlCenterMotionEvent::Entered),
-            );
         });
     }
 
     fn dismiss(self: &Rc<Self>) {
+        self.dismiss_then(|| {});
+    }
+
+    /// Collapses back into the origin, then runs `after` once the panel is hidden.
+    fn dismiss_then(self: &Rc<Self>, after: impl FnOnce() + 'static) {
         let current = self.phase.get();
         let next = current.transition(ControlCenterMotionEvent::Dismiss);
+        let (Some(_window), Some(root), Some(panel)) = (
+            self.window.upgrade(),
+            self.root.upgrade(),
+            self.panel.upgrade(),
+        ) else {
+            after();
+            return;
+        };
         if next == current {
+            after();
             return;
         }
-
-        let Some(window) = self.window.upgrade() else {
-            return;
-        };
-        let Some(root) = self.root.upgrade() else {
-            return;
-        };
-
-        let generation = self.advance_generation();
-        root.remove_css_class("control-center-entering");
-        root.remove_css_class("control-center-exiting");
         root.set_sensitive(false);
-
         if !animations_enabled() {
-            self.phase.set(ControlCenterMotionPhase::Hidden);
-            root.set_sensitive(true);
-            window.set_visible(false);
+            self.hide_now();
+            after();
             return;
         }
-
         self.phase.set(next);
-        root.add_css_class("control-center-exiting");
-
+        panel.collapse_into(self.origin.get(), false, || {});
         let motion = Rc::downgrade(self);
-        glib::timeout_add_local_once(Duration::from_millis(CONTROL_CENTER_EXIT_MS), move || {
-            let Some(motion) = motion.upgrade() else {
-                return;
-            };
-            if motion.generation.get() != generation {
-                return;
+        panel.on_settled(move || {
+            if let Some(motion) = motion.upgrade() {
+                motion.phase.set(
+                    motion
+                        .phase
+                        .get()
+                        .transition(ControlCenterMotionEvent::Exited),
+                );
+                if let Some(root) = motion.root.upgrade() {
+                    root.set_sensitive(true);
+                }
+                if let Some(window) = motion.window.upgrade() {
+                    window.set_visible(false);
+                }
             }
-            if let Some(root) = motion.root.upgrade() {
-                root.remove_css_class("control-center-exiting");
-                root.set_sensitive(true);
-            }
-            motion.phase.set(
-                motion
-                    .phase
-                    .get()
-                    .transition(ControlCenterMotionEvent::Exited),
-            );
-            if let Some(window) = motion.window.upgrade() {
-                window.set_visible(false);
-            }
+            after();
         });
+    }
+
+    /// Hides without animation; used by the session lock and output changes.
+    fn hide_now(&self) {
+        if let Some(panel) = self.panel.upgrade() {
+            panel.cancel();
+        }
+        self.phase.set(ControlCenterMotionPhase::Hidden);
+        if let Some(root) = self.root.upgrade() {
+            root.set_sensitive(true);
+        }
+        if let Some(window) = self.window.upgrade() {
+            window.set_visible(false);
+        }
     }
 
     fn is_presented(&self) -> bool {
@@ -1251,23 +1251,22 @@ impl ControlCenterMotion {
     }
 
     fn destroy(&self) {
-        self.advance_generation();
-        self.phase.set(ControlCenterMotionPhase::Hidden);
-        if let Some(root) = self.root.upgrade() {
-            root.remove_css_class("control-center-entering");
-            root.remove_css_class("control-center-exiting");
-            root.set_sensitive(true);
-        }
+        self.hide_now();
         if let Some(window) = self.window.upgrade() {
             window.close();
         }
     }
+}
 
-    fn advance_generation(&self) -> u64 {
-        let next = self.generation.get().wrapping_add(1);
-        self.generation.set(next);
-        next
-    }
+/// Converts a monitor-space origin into the stage, falling back to a centered scale.
+fn panel_origin(origin: Option<MorphRect>, monitor_width: i32, stage_width: i32) -> MorphOrigin {
+    origin.map_or(MorphOrigin::Scaled(0.92), |rect| {
+        MorphOrigin::Window(stage::monitor_to_top_right_stage(
+            rect,
+            monitor_width,
+            stage_width,
+        ))
+    })
 }
 
 fn animations_enabled() -> bool {
@@ -1306,6 +1305,8 @@ struct MetricVisual {
 
 pub struct ControlCenterView {
     window: gtk::ApplicationWindow,
+    stage_box: gtk::Box,
+    panel_morph: MorphBin,
     motion: Rc<ControlCenterMotion>,
     current: Rc<RefCell<ControlCenterSpec>>,
     navigation: NavigationUi,
@@ -1390,9 +1391,11 @@ impl ControlCenterView {
         window.set_layer(Layer::Overlay);
         window.set_anchor(Edge::Top, true);
         window.set_anchor(Edge::Right, true);
+        window.set_anchor(Edge::Bottom, true);
         window.set_margin(Edge::Top, top_margin);
         window.set_margin(Edge::Right, right_margin);
-        window.set_exclusive_zone(0);
+        window.set_margin(Edge::Bottom, top_margin);
+        window.set_exclusive_zone(-1);
         window.set_keyboard_mode(KeyboardMode::OnDemand);
         window.set_monitor(Some(monitor));
 
@@ -1758,9 +1761,36 @@ impl ControlCenterView {
         root.append(&stack);
         root.append(&error_slot);
         root.append(&footer);
-        window.set_child(Some(&root));
 
-        let motion = Rc::new(ControlCenterMotion::new(&window, &root));
+        let panel_morph = MorphBin::new();
+        panel_morph.set_halign(gtk::Align::End);
+        panel_morph.set_valign(gtk::Align::Start);
+        panel_morph.set_margin_top(stage::panel_top_in_stage());
+        panel_morph.set_radius(stage::CONTROL_CENTER_RADIUS);
+        panel_morph.set_shadow(Some(MorphShadow {
+            dy: 18.0,
+            blur: 48.0,
+            alpha: 0.44,
+        }));
+        panel_morph.set_child(Some(&root));
+        let stage_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        stage_box.append(&panel_morph);
+        window.set_child(Some(&stage_box));
+        {
+            let panel = panel_morph.downgrade();
+            stage::track_input(&window, move || {
+                panel
+                    .upgrade()
+                    .and_then(|panel| {
+                        let root = panel.root()?;
+                        panel.shape_in(&root)
+                    })
+                    .into_iter()
+                    .collect()
+            });
+        }
+
+        let motion = Rc::new(ControlCenterMotion::new(&window, &root, &panel_morph));
 
         {
             let suggestion_engine = suggestion_engine.clone();
@@ -1815,21 +1845,17 @@ impl ControlCenterView {
         let output_for_footer = output_name.to_string();
         footer.connect_clicked(move |_| {
             let focus = nav_for_footer.page.get();
-            motion_for_footer.dismiss();
             let sender = sender_for_footer.clone();
             let output = output_for_footer.clone();
-            glib::timeout_add_local_once(
-                Duration::from_millis(CONTROL_CENTER_EXIT_MS),
-                move || {
-                    let _ = sender.send(ActionRequest {
-                        origin: control_center_origin(focus, "open-luma"),
-                        intent: ActionIntent::OpenContextQuery {
-                            context: focus.into(),
-                            output,
-                        },
-                    });
-                },
-            );
+            motion_for_footer.dismiss_then(move || {
+                let _ = sender.send(ActionRequest {
+                    origin: control_center_origin(focus, "open-luma"),
+                    intent: ActionIntent::OpenContextQuery {
+                        context: focus.into(),
+                        output,
+                    },
+                });
+            });
         });
 
         connect_toggle_controls(
@@ -1973,6 +1999,8 @@ impl ControlCenterView {
         let artwork = ArtworkController::new(&window, &media_widgets);
         let view = Self {
             window,
+            stage_box,
+            panel_morph,
             motion,
             current,
             navigation,
@@ -2043,13 +2071,40 @@ impl ControlCenterView {
     }
 
     pub fn present(&self) {
-        self.motion.present();
+        self.present_from(None);
+    }
+
+    /// Opens the panel growing out of `origin` (monitor-logical coordinates).
+    pub fn present_from(&self, origin: Option<MorphRect>) {
+        let monitor_width = self
+            .window
+            .monitor()
+            .map_or(0, |monitor| monitor.geometry().width());
+        let (_, panel_width, _, _) = self.panel_morph.measure(gtk::Orientation::Horizontal, -1);
+        let stage_width = stage::control_center_stage_width(panel_width, origin, monitor_width);
+        if !self.window.is_visible() {
+            self.stage_box.set_size_request(stage_width, -1);
+        }
+        let stage_width = self.stage_box.width_request().max(stage_width);
+        self.motion
+            .present(panel_origin(origin, monitor_width, stage_width));
         sync_bluetooth_discovery(
             &self.timer_sender,
             &self.current,
             &self.bluetooth_discovery_active,
             self.current_page() == ControlCenterFocus::Bluetooth,
         );
+    }
+
+    /// Hides immediately without a morph (session lock, IPC close).
+    pub fn dismiss_now(&self) {
+        sync_bluetooth_discovery(
+            &self.timer_sender,
+            &self.current,
+            &self.bluetooth_discovery_active,
+            false,
+        );
+        self.motion.hide_now();
     }
 
     pub fn dismiss(&self) {
@@ -5018,6 +5073,20 @@ mod tests {
         metric_visual, notification_age_label, notification_image_presentation,
         quick_grid_placements, timer_action_state, volume_icon_name,
     };
+
+    #[test]
+    fn panel_stage_origin_falls_back_in_order() {
+        use super::panel_origin;
+        use crate::ui::morph::MorphRect;
+        use crate::ui::morph_bin::MorphOrigin;
+
+        let button = MorphRect::new(2300.0, 9.0, 30.0, 28.0);
+        assert_eq!(
+            panel_origin(Some(button), 2560, 512),
+            MorphOrigin::Window(MorphRect::new(257.0, 4.0, 30.0, 28.0))
+        );
+        assert_eq!(panel_origin(None, 2560, 512), MorphOrigin::Scaled(0.92));
+    }
 
     #[test]
     fn control_center_motion_reopens_during_exit() {

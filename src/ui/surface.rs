@@ -636,7 +636,10 @@ impl SurfaceRegistry {
             surface.control_center.set_monitor(monitor);
         }
         surface.control_center.show_page(focus);
-        surface.control_center.present();
+        let origin = (target_output == primary_output)
+            .then(|| widget_monitor_rect(&surface.system_box))
+            .flatten();
+        surface.control_center.present_from(origin);
         true
     }
 
@@ -670,7 +673,7 @@ impl SurfaceRegistry {
     pub fn close_control_center(&self) {
         for surface in self.surfaces.values() {
             if let SurfaceHandle::Primary(surface) = surface {
-                surface.control_center.dismiss();
+                surface.control_center.dismiss_now();
             }
         }
     }
@@ -759,6 +762,7 @@ impl SurfaceHandle {
 
 pub struct PrimarySurface {
     window: gtk::ApplicationWindow,
+    system_box: gtk::Box,
     workspaces: WorkspaceStrip,
     app_label: gtk::Label,
     title_label: gtk::Label,
@@ -1064,6 +1068,7 @@ impl PrimarySurface {
 
         let mut surface = Self {
             window,
+            system_box,
             workspaces,
             app_label,
             title_label,
@@ -1683,6 +1688,7 @@ fn install_context_interactions(
     let primary = gtk::GestureClick::new();
     primary.set_button(1);
     let context_for_primary = current_context.clone();
+    let context_row_for_origin = context_row.clone();
     primary.connect_pressed(move |_, _, _, _| {
         let Some(context) = context_for_primary.borrow().clone() else {
             return;
@@ -1695,6 +1701,7 @@ fn install_context_interactions(
                     control_center.clone(),
                     coordinator.clone(),
                     registry.clone(),
+                    widget_monitor_rect(&context_row_for_origin),
                 );
             }
             Some(ContextAction::FocusWindow { output, window_id }) => {
@@ -1957,10 +1964,16 @@ fn build_status_button(
 
     let focus = control_focus(button_spec.id);
     let center_for_click = control_center.clone();
-    button.connect_clicked(move |_| {
+    button.connect_clicked(move |button| {
         if center_for_click.is_visible() && center_for_click.current_page() == focus {
             center_for_click.dismiss();
             return;
+        }
+        if !center_for_click.is_visible()
+            && let Some(window) = button.root().and_downcast::<gtk::Window>()
+            && let Some(monitor) = window.monitor()
+        {
+            center_for_click.set_monitor(&monitor);
         }
         center_for_click.show_page(focus);
         show_managed_window(
@@ -1968,6 +1981,7 @@ fn build_status_button(
             center_for_click.clone(),
             coordinator.clone(),
             registry.clone(),
+            widget_monitor_rect(button),
         );
     });
 
@@ -2147,6 +2161,7 @@ fn show_managed_window(
     control_center: Rc<ControlCenterView>,
     coordinator: Rc<RefCell<PopoverCoordinator>>,
     registry: PopoverRegistry,
+    origin: Option<MorphRect>,
 ) {
     if let Some(previous) = coordinator.borrow_mut().open(overlay_id)
         && previous != overlay_id
@@ -2154,7 +2169,7 @@ fn show_managed_window(
     {
         active.hide();
     }
-    control_center.present();
+    control_center.present_from(origin);
 }
 
 fn popdown_active_popover(
