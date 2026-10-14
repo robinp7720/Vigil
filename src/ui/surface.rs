@@ -25,8 +25,10 @@ use super::context_card::{
 use super::control_center::{
     ControlCenterFocus, ControlCenterView, NotificationPresentation, notification_row,
 };
+use super::morph::{self, MorphRect};
+use super::morph_bin::MorphBin;
 use super::popovers::PopoverCoordinator;
-use super::stage::{BAR_HEIGHT, NOTIFICATION_GAP, SURFACE_MARGIN};
+use super::stage::{self, BAR_HEIGHT, NOTIFICATION_GAP, SURFACE_MARGIN};
 use super::system::{SystemButtonSpec, SystemCluster, SystemModuleId, build_system_cluster};
 use super::wm::{WindowGroupSpec, select_primary_output, title_for_output, window_groups};
 
@@ -768,7 +770,9 @@ pub struct PrimarySurface {
     context_media_controls: gtk::Box,
     context_media_play: gtk::Button,
     current_context: Rc<RefCell<Option<ContextSpec>>>,
-    suggestion_revealer: gtk::Revealer,
+    suggestion_actions: gtk::Box,
+    context_morph: MorphBin,
+    center_slot: gtk::Box,
     suggestion_action: gtk::Button,
     current_suggestion: Rc<RefCell<Option<Suggestion>>>,
     system_items: gtk::Box,
@@ -876,8 +880,7 @@ impl PrimarySurface {
         context_stack.set_hexpand(true);
         context_stack.set_hhomogeneous(false);
         context_stack.set_vhomogeneous(true);
-        context_stack.set_transition_duration(180);
-        context_stack.set_transition_type(context_transition_type());
+        context_stack.set_transition_type(gtk::StackTransitionType::None);
         let context_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         context_row.add_css_class("context-chip");
         context_row.set_hexpand(false);
@@ -917,19 +920,18 @@ impl PrimarySurface {
         suggestion_dismiss.add_css_class("suggestion-dismiss");
         suggestion_actions.append(&suggestion_action);
         suggestion_actions.append(&suggestion_dismiss);
-        let suggestion_revealer = gtk::Revealer::new();
-        suggestion_revealer.set_transition_type(gtk::RevealerTransitionType::SlideLeft);
-        suggestion_revealer.set_transition_duration(240);
-        suggestion_revealer.set_child(Some(&suggestion_actions));
-        suggestion_revealer.set_reveal_child(false);
-        context_row.append(&suggestion_revealer);
+        suggestion_actions.set_visible(false);
+        context_row.append(&suggestion_actions);
         let current_context = Rc::new(RefCell::new(None::<ContextSpec>));
         let current_suggestion = Rc::new(RefCell::new(None::<Suggestion>));
         context_stack.add_named(&title_button, Some("title"));
         context_stack.add_named(&context_row, Some("context"));
         context_stack.set_visible_child_name("title");
 
-        center_slot.append(&context_stack);
+        let context_morph = MorphBin::new();
+        context_morph.set_follow(true, false);
+        context_morph.set_child(Some(&context_stack));
+        center_slot.append(&context_morph);
 
         let system_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         system_box.add_css_class("bar-island");
@@ -1073,7 +1075,9 @@ impl PrimarySurface {
             context_media_controls,
             context_media_play,
             current_context,
-            suggestion_revealer,
+            suggestion_actions,
+            context_morph,
+            center_slot,
             suggestion_action,
             current_suggestion,
             system_items,
@@ -1118,58 +1122,65 @@ impl PrimarySurface {
         }
 
         if plan.context {
-            *self.current_context.borrow_mut() = spec.context.clone();
-            *self.current_suggestion.borrow_mut() = spec.suggestion.clone();
-            self.suggestion_action.remove_css_class("is-pending");
-            self.suggestion_action.remove_css_class("is-success");
-            self.suggestion_action.remove_css_class("is-failure");
-            if let Some(suggestion) = spec.suggestion.as_ref() {
-                self.suggestion_action.set_label(&suggestion.action_label);
-                self.suggestion_action
-                    .set_tooltip_text(Some(&suggestion.reason));
-                self.suggestion_revealer.set_reveal_child(true);
-                self.context_row.add_css_class("proactive");
-            } else {
-                self.suggestion_action.set_label("");
-                self.suggestion_action.set_tooltip_text(None);
-                self.suggestion_revealer.set_reveal_child(false);
-                self.context_row.remove_css_class("proactive");
-            }
-
-            if let Some(context) = spec.context.as_ref() {
-                self.context_icon.set_icon_name(Some(&context.icon_name));
-                self.context_label.set_label(&context.text);
-                set_context_accessibility(&self.context_row, &context.text);
-                apply_tier_classes(&self.context_row, context.tier);
-                apply_context_motion_classes(&self.context_row, &context.card);
-                self.context_stack.set_visible_child_name("context");
-                if let ContextCard::Media { status, .. } = &context.card {
-                    self.context_media_play
-                        .set_icon_name(media_playback_icon(status));
-                    self.context_media_controls.set_visible(true);
+            self.context_morph.crossfade(|| {
+                *self.current_context.borrow_mut() = spec.context.clone();
+                *self.current_suggestion.borrow_mut() = spec.suggestion.clone();
+                self.suggestion_action.remove_css_class("is-pending");
+                self.suggestion_action.remove_css_class("is-success");
+                self.suggestion_action.remove_css_class("is-failure");
+                if let Some(suggestion) = spec.suggestion.as_ref() {
+                    self.suggestion_action.set_label(&suggestion.action_label);
+                    self.suggestion_action
+                        .set_tooltip_text(Some(&suggestion.reason));
+                    self.suggestion_actions.set_visible(true);
+                    self.context_row.add_css_class("proactive");
                 } else {
+                    self.suggestion_action.set_label("");
+                    self.suggestion_action.set_tooltip_text(None);
+                    self.suggestion_actions.set_visible(false);
+                    self.context_row.remove_css_class("proactive");
+                }
+
+                if let Some(context) = spec.context.as_ref() {
+                    self.context_icon.set_icon_name(Some(&context.icon_name));
+                    self.context_label.set_label(&context.text);
+                    set_context_accessibility(&self.context_row, &context.text);
+                    apply_tier_classes(&self.context_row, context.tier);
+                    apply_context_motion_classes(&self.context_row, &context.card);
+                    self.context_stack.set_visible_child_name("context");
+                    if let ContextCard::Media { status, .. } = &context.card {
+                        self.context_media_play
+                            .set_icon_name(media_playback_icon(status));
+                        self.context_media_controls.set_visible(true);
+                    } else {
+                        self.context_media_controls.set_visible(false);
+                    }
+                } else if let Some(suggestion) = spec.suggestion.as_ref() {
+                    self.context_icon.set_icon_name(Some(&suggestion.icon_name));
+                    self.context_label.set_label(&suggestion.title);
+                    set_context_accessibility(&self.context_row, &suggestion.title);
+                    clear_tier_classes(&self.context_row);
+                    clear_context_motion_classes(&self.context_row);
+                    self.context_row.add_css_class("suggestion");
+                    self.context_stack.set_visible_child_name("context");
+                    self.context_media_controls.set_visible(false);
+                } else {
+                    self.context_icon.set_icon_name(None);
+                    self.context_label.set_label("");
+                    clear_tier_classes(&self.context_row);
+                    clear_context_motion_classes(&self.context_row);
+                    self.context_stack.set_visible_child_name("title");
                     self.context_media_controls.set_visible(false);
                 }
-            } else if let Some(suggestion) = spec.suggestion.as_ref() {
-                self.context_icon.set_icon_name(Some(&suggestion.icon_name));
-                self.context_label.set_label(&suggestion.title);
-                set_context_accessibility(&self.context_row, &suggestion.title);
-                clear_tier_classes(&self.context_row);
-                clear_context_motion_classes(&self.context_row);
-                self.context_row.add_css_class("suggestion");
-                self.context_stack.set_visible_child_name("context");
-                self.context_media_controls.set_visible(false);
-            } else {
-                self.context_icon.set_icon_name(None);
-                self.context_label.set_label("");
-                clear_tier_classes(&self.context_row);
-                clear_context_motion_classes(&self.context_row);
-                self.context_stack.set_visible_child_name("title");
-                self.context_media_controls.set_visible(false);
-            }
+            });
         }
 
         self.current_spec = Some(spec.clone());
+    }
+
+    /// The center island in monitor coordinates, used as the origin of toast morphs.
+    fn island_rect(&self) -> Option<MorphRect> {
+        widget_monitor_rect(&self.center_slot)
     }
 
     pub fn handle_completion(&mut self, completion: &ActionCompletion) -> bool {
@@ -1775,14 +1786,6 @@ fn rebuild_window_popover(
     popover.set_child(Some(&column));
 }
 
-fn context_transition_type() -> gtk::StackTransitionType {
-    if gtk::Settings::default().is_some_and(|settings| settings.is_gtk_enable_animations()) {
-        gtk::StackTransitionType::Crossfade
-    } else {
-        gtk::StackTransitionType::None
-    }
-}
-
 fn apply_tier_classes(widget: &impl IsA<gtk::Widget>, tier: crate::ContextTier) {
     clear_tier_classes(widget);
     match tier {
@@ -1835,6 +1838,7 @@ fn apply_motion_style(
     style: MotionStyle,
     ambient_motion: AmbientMotion,
 ) {
+    morph::set_motion_style(style);
     widget.remove_css_class("motion-calm");
     widget.remove_css_class("motion-bold");
     widget.remove_css_class("ambient-off");
@@ -1915,6 +1919,18 @@ impl StatusButtonView {
             flash_class(&self.button, "state-changed", 480);
         }
     }
+}
+
+/// A bar widget's bounds in monitor-logical coordinates.
+fn widget_monitor_rect(widget: &impl IsA<gtk::Widget>) -> Option<MorphRect> {
+    let root = widget.root()?;
+    let bounds = widget.compute_bounds(&root)?;
+    Some(stage::bar_to_monitor(MorphRect::new(
+        bounds.x(),
+        bounds.y(),
+        bounds.width(),
+        bounds.height(),
+    )))
 }
 
 fn set_context_accessibility(widget: &gtk::Box, label: &str) {
