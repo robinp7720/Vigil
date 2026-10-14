@@ -2153,6 +2153,10 @@ impl ControlCenterView {
         let request = stage::stage_width_request(current_request, needed, visible);
         if request != current_request {
             self.stage_box.set_size_request(request, -1);
+            if !visible {
+                // Otherwise a hidden window keeps a wider earlier size and offsets origins.
+                self.window.set_default_size(request, -1);
+            }
         }
         // The window is resizable, so a visible stage may be wider than its request.
         let allocated = visible.then(|| self.stage_box.width());

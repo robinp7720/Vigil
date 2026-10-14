@@ -113,7 +113,17 @@ fn card_identity(card: &ContextCard) -> String {
         ContextCard::Calendar { id, .. } => format!("calendar|{id}"),
         ContextCard::Timer { id, .. } => format!("timer|{id}"),
         ContextCard::Activity { id, .. } => format!("activity|{id}"),
-        ContextCard::Media { player, .. } => format!("media|{player}"),
+        // Playback status updates in place; a new track is new content.
+        ContextCard::Media {
+            player,
+            title,
+            artist,
+            ..
+        } => format!(
+            "media|{player}|{}|{}",
+            title.as_deref().unwrap_or_default(),
+            artist.as_deref().unwrap_or_default()
+        ),
         ContextCard::Urgent {
             output,
             workspace,
@@ -3065,6 +3075,23 @@ mod tests {
         assert_ne!(
             context_identity(Some(&timer), None),
             context_identity(Some(&battery), None)
+        );
+        let media = |status, title: &str| super::ContextSpec {
+            card: crate::ContextCard::Media {
+                player: "spotify".to_string(),
+                status,
+                title: Some(title.to_string()),
+                artist: Some("Artist".to_string()),
+            },
+            ..timer.clone()
+        };
+        assert_eq!(
+            context_identity(Some(&media(crate::PlaybackStatus::Playing, "One")), None),
+            context_identity(Some(&media(crate::PlaybackStatus::Paused, "One")), None)
+        );
+        assert_ne!(
+            context_identity(Some(&media(crate::PlaybackStatus::Playing, "One")), None),
+            context_identity(Some(&media(crate::PlaybackStatus::Playing, "Two")), None)
         );
         let other_timer = timer_context("pasta", 60, 1_000);
         assert_ne!(
