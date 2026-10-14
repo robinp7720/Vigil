@@ -1387,10 +1387,11 @@ impl PrimarySurface {
         if plan.context {
             // Text and value refreshes (timer ticks, `now_epoch`) apply in place; the
             // width still springs through measure. Only new content crossfades.
-            let crossfade = self.current_spec.as_ref().is_some_and(|previous| {
+            let arrived = self.current_spec.as_ref().is_none_or(|previous| {
                 context_identity(previous.context.as_ref(), previous.suggestion.as_ref())
                     != context_identity(spec.context.as_ref(), spec.suggestion.as_ref())
             });
+            let crossfade = arrived && self.current_spec.is_some();
             let apply = || {
                 *self.current_context.borrow_mut() = spec.context.clone();
                 *self.current_suggestion.borrow_mut() = spec.suggestion.clone();
@@ -1415,7 +1416,7 @@ impl PrimarySurface {
                     self.context_label.set_label(&context.text);
                     set_context_accessibility(&self.context_row, &context.text);
                     apply_tier_classes(&self.context_row, context.tier);
-                    apply_context_motion_classes(&self.context_row, &context.card);
+                    apply_context_motion_classes(&self.context_row, &context.card, arrived);
                     self.context_stack.set_visible_child_name("context");
                     if let ContextCard::Media { status, .. } = &context.card {
                         self.context_media_play
@@ -2078,8 +2079,12 @@ fn clear_tier_classes(widget: &impl IsA<gtk::Widget>) {
     widget.remove_css_class("critical");
 }
 
-fn apply_context_motion_classes(widget: &impl IsA<gtk::Widget>, card: &ContextCard) {
-    clear_context_motion_classes(widget);
+/// Sets the card's state classes; `arrived` replays the arrival flash, which must not
+/// rerun for in-place refreshes such as timer ticks.
+fn apply_context_motion_classes(widget: &impl IsA<gtk::Widget>, card: &ContextCard, arrived: bool) {
+    for class_name in CONTEXT_STATE_CLASSES {
+        widget.remove_css_class(class_name);
+    }
     match card {
         ContextCard::Activity {
             status: crate::ActivityStatus::Running,
@@ -2094,19 +2099,18 @@ fn apply_context_motion_classes(widget: &impl IsA<gtk::Widget>, card: &ContextCa
         } => widget.add_css_class("is-complete"),
         _ => {}
     }
-    flash_class(widget, "context-arrived", 560);
+    if arrived {
+        flash_class(widget, "context-arrived", 560);
+    }
 }
 
+const CONTEXT_STATE_CLASSES: [&str; 4] = ["suggestion", "is-running", "is-playing", "is-complete"];
+
 fn clear_context_motion_classes(widget: &impl IsA<gtk::Widget>) {
-    for class_name in [
-        "suggestion",
-        "is-running",
-        "is-playing",
-        "is-complete",
-        "context-arrived",
-    ] {
+    for class_name in CONTEXT_STATE_CLASSES {
         widget.remove_css_class(class_name);
     }
+    widget.remove_css_class("context-arrived");
 }
 
 fn apply_motion_style(
