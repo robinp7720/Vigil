@@ -30,7 +30,10 @@ enum TransformKind {
 struct Transform {
     kind: TransformKind,
     origin: MorphOrigin,
+    /// `Window` origins resolved against a real root point (local coordinates).
     resolved: Option<MorphRect>,
+    /// Shape on screen when this transform interrupted another one (local coordinates).
+    from: Option<MorphRect>,
     capture: bool,
     progress: Spring,
 }
@@ -85,6 +88,10 @@ mod imp {
             if let Some(tick) = self.tick.take() {
                 tick.remove();
             }
+            self.settled.take();
+            self.transform.take();
+            self.ghost.take();
+            self.crossfade.take();
             if let Some(child) = self.child.take() {
                 child.unparent();
             }
@@ -96,8 +103,17 @@ mod imp {
             let Some(child) = self.child.borrow().clone() else {
                 return (0, 0, -1, -1);
             };
-            let (minimum, natural, _, _) = child.measure(orientation, for_size);
             let horizontal = orientation == gtk::Orientation::Horizontal;
+            // The child is allocated at `max(natural, bin width)` when following width and
+            // at the bin width otherwise (see `size_allocate`); measure its height for
+            // that same width so measure and allocate agree.
+            let child_for = if !horizontal && for_size >= 0 && self.follow_width.get() {
+                let (min_w, nat_w, _, _) = child.measure(gtk::Orientation::Horizontal, -1);
+                nat_w.max(for_size).max(min_w)
+            } else {
+                for_size
+            };
+            let (minimum, natural, _, _) = child.measure(orientation, child_for);
             let follows = if horizontal {
                 self.follow_width.get()
             } else {
@@ -106,7 +122,12 @@ mod imp {
             if !follows {
                 return (minimum, natural, -1, -1);
             }
-            let tracks = horizontal || for_size < 0 || for_size == self.obj().width();
+            // Only the height measured for the width the child is actually allocated at
+            // (the bin's current width) drives the height spring; other `for_size` probes
+            // would flip the target. Before the first allocation only the unconstrained
+            // measure is available.
+            let allocated = self.obj().width();
+            let tracks = horizontal || for_size == allocated || (allocated == 0 && for_size < 0);
             let slot = if horizontal {
                 &self.width
             } else {
@@ -174,17 +195,15 @@ mod imp {
                 return;
             }
             let bounds = MorphRect::new(0.0, 0.0, obj.width() as f32, obj.height() as f32);
-            self.resolve_origin(bounds);
-            let resizing = self.is_resizing();
-            if resizing {
-                snapshot.push_clip(&to_graphene(bounds));
-            }
-            match self.transform.borrow().as_ref() {
-                None => self.snapshot_crossfade(snapshot, bounds),
-                Some(transform) => self.snapshot_transform(snapshot, bounds, transform),
-            }
-            if resizing {
-                snapshot.pop();
+            // Resolve (and possibly cache) before any transform borrow is held for drawing.
+            let endpoints = self.endpoints(bounds);
+            match (self.transform.borrow().as_ref(), endpoints) {
+                (Some(transform), Some((from, to))) => {
+                    self.snapshot_transform(snapshot, bounds, transform, from, to)
+                }
+                _ => self.clipped(snapshot, |snapshot| {
+                    self.snapshot_crossfade(snapshot, bounds)
+                }),
             }
         }
     }
@@ -226,7 +245,11 @@ mod imp {
                     .map_or(0.0, |last| (now - last) as f64 / 1_000_000.0);
                 imp.advance(seconds);
                 if imp.is_animating() {
-                    obj.queue_resize();
+                    if imp.is_resizing() {
+                        obj.queue_resize();
+                    } else {
+                        obj.queue_draw();
+                    }
                     glib::ControlFlow::Continue
                 } else {
                     imp.tick.take();
@@ -270,42 +293,93 @@ mod imp {
             MorphRect::new(0.0, 0.0, obj.width() as f32, obj.height() as f32)
         }
 
-        pub(super) fn resolve_origin(&self, bounds: MorphRect) {
-            let mut transform = self.transform.borrow_mut();
-            let Some(transform) = transform.as_mut() else {
-                return;
+        /// Origin/target rectangle of the active transform in local coordinates.
+        /// `Scaled` follows the current bounds every frame; `Window` is cached once it
+        /// has been resolved against a real root point, never while bounds are empty.
+        fn resolve_origin(&self, bounds: MorphRect) -> Option<MorphRect> {
+            let (origin, resolved) = {
+                let transform = self.transform.borrow();
+                let transform = transform.as_ref()?;
+                (transform.origin, transform.resolved)
             };
-            if transform.resolved.is_some() {
-                return;
-            }
-            let obj = self.obj();
-            transform.resolved = Some(match transform.origin {
+            let fallback = bounds.scaled_about_center(0.92);
+            Some(match origin {
                 MorphOrigin::Scaled(factor) => bounds.scaled_about_center(factor),
                 MorphOrigin::Local(rect) => rect,
-                MorphOrigin::Window(rect) => obj
-                    .root()
-                    .and_then(|root| obj.compute_point(&root, &graphene::Point::zero()))
-                    .map_or(bounds.scaled_about_center(0.92), |point| {
-                        rect.translated(-point.x(), -point.y())
-                    }),
-            });
+                MorphOrigin::Window(rect) => {
+                    if let Some(resolved) = resolved {
+                        return Some(resolved);
+                    }
+                    if bounds.width <= 0.0 || bounds.height <= 0.0 {
+                        return Some(fallback);
+                    }
+                    let obj = self.obj();
+                    let point = obj
+                        .root()
+                        .and_then(|root| obj.compute_point(&root, &graphene::Point::zero()));
+                    let Some(point) = point else {
+                        return Some(fallback);
+                    };
+                    let rect = rect.translated(-point.x(), -point.y());
+                    if let Some(transform) = self.transform.borrow_mut().as_mut() {
+                        transform.resolved = Some(rect);
+                    }
+                    rect
+                }
+            })
+        }
+
+        /// `(from, to)` shapes of the active transform in local coordinates.
+        fn endpoints(&self, bounds: MorphRect) -> Option<(MorphRect, MorphRect)> {
+            let origin = self.resolve_origin(bounds)?;
+            let transform = self.transform.borrow();
+            let transform = transform.as_ref()?;
+            Some(match transform.kind {
+                TransformKind::Expand => (transform.from.unwrap_or(origin), bounds),
+                TransformKind::Collapse => (transform.from.unwrap_or(bounds), origin),
+            })
         }
 
         /// The currently visible shape in local coordinates.
         pub(super) fn current_shape(&self) -> MorphRect {
             let bounds = self.bounds();
-            self.resolve_origin(bounds);
-            match self.transform.borrow().as_ref() {
-                None => bounds,
-                Some(transform) => {
-                    let origin = transform.resolved.unwrap_or(bounds);
-                    let progress = transform.progress.value() as f32;
-                    match transform.kind {
-                        TransformKind::Expand => origin.lerp(bounds, progress),
-                        TransformKind::Collapse => bounds.lerp(origin, progress),
-                    }
+            let Some((from, to)) = self.endpoints(bounds) else {
+                return bounds;
+            };
+            let progress = self
+                .transform
+                .borrow()
+                .as_ref()
+                .map_or(1.0, |transform| transform.progress.value() as f32);
+            from.lerp(to, progress)
+        }
+
+        /// Runs `draw` clipped to the bounds while the size is animating.
+        fn clipped(&self, snapshot: &gtk::Snapshot, draw: impl FnOnce(&gtk::Snapshot)) {
+            let resizing = self.is_resizing();
+            if resizing {
+                snapshot.push_clip(&to_graphene(self.bounds()));
+            }
+            draw(snapshot);
+            if resizing {
+                snapshot.pop();
+            }
+        }
+
+        /// Stops all motion and snaps sizes to their targets. Keeps `settled` untouched.
+        pub(super) fn halt(&self) {
+            if let Some(tick) = self.tick.take() {
+                tick.remove();
+            }
+            for slot in [&self.width, &self.height] {
+                if let Some(spring) = slot.borrow_mut().as_mut() {
+                    let target = spring.target();
+                    spring.snap(target);
                 }
             }
+            self.transform.take();
+            self.ghost.take();
+            self.crossfade.take();
         }
 
         pub(super) fn capture(&self) -> Option<Ghost> {
@@ -361,18 +435,22 @@ mod imp {
             snapshot: &gtk::Snapshot,
             bounds: MorphRect,
             transform: &Transform,
+            from: MorphRect,
+            to: MorphRect,
         ) {
             let progress = transform.progress.value();
-            let origin = transform.resolved.unwrap_or(bounds);
             let ghost = self.ghost.borrow();
             match transform.kind {
                 TransformKind::Expand => {
                     if let Some(ghost) = ghost.as_ref() {
-                        snapshot.push_opacity(fade_out(progress, 0.0, 0.4));
-                        self.snapshot_ghost(snapshot, ghost, ghost.rect.x, ghost.rect.y);
-                        snapshot.pop();
+                        self.clipped(snapshot, |snapshot| {
+                            snapshot.push_opacity(fade_out(progress, 0.0, 0.4));
+                            self.snapshot_ghost(snapshot, ghost, ghost.rect.x, ghost.rect.y);
+                            snapshot.pop();
+                        });
                     }
-                    let shape = origin.lerp(bounds, progress as f32);
+                    let origin = from;
+                    let shape = from.lerp(to, progress as f32);
                     self.snapshot_shaped(
                         snapshot,
                         shape,
@@ -383,12 +461,15 @@ mod imp {
                     );
                 }
                 TransformKind::Collapse => {
-                    let shape = bounds.lerp(origin, progress as f32);
+                    let origin = to;
+                    let shape = from.lerp(to, progress as f32);
                     let opacity = fade_out(progress, 0.5, 1.0);
                     if transform.capture {
-                        snapshot.push_opacity(fade_in(progress, 0.0, 0.6));
-                        self.snapshot_child(snapshot);
-                        snapshot.pop();
+                        self.clipped(snapshot, |snapshot| {
+                            snapshot.push_opacity(fade_in(progress, 0.0, 0.6));
+                            self.snapshot_child(snapshot);
+                            snapshot.pop();
+                        });
                         if let Some(ghost) = ghost.as_ref() {
                             let full = ghost.rect;
                             self.snapshot_shaped(
@@ -440,17 +521,20 @@ mod imp {
                     shadow.blur,
                 );
             }
-            snapshot.push_opacity(opacity);
-            snapshot.push_rounded_clip(&outline);
-            snapshot.save();
-            snapshot.translate(&graphene::Point::new(shape.x, shape.y));
-            let scale = content_scale(shape, full);
-            snapshot.scale(scale, scale);
-            snapshot.translate(&graphene::Point::new(-full.x, -full.y));
-            content(snapshot);
-            snapshot.restore();
-            snapshot.pop();
-            snapshot.pop();
+            // The resize clip applies to the content only, never to the outset shadow.
+            self.clipped(snapshot, |snapshot| {
+                snapshot.push_opacity(opacity);
+                snapshot.push_rounded_clip(&outline);
+                snapshot.save();
+                snapshot.translate(&graphene::Point::new(shape.x, shape.y));
+                let scale = content_scale(shape, full);
+                snapshot.scale(scale, scale);
+                snapshot.translate(&graphene::Point::new(-full.x, -full.y));
+                content(snapshot);
+                snapshot.restore();
+                snapshot.pop();
+                snapshot.pop();
+            });
         }
     }
 }
@@ -512,11 +596,13 @@ impl MorphBin {
 
     pub fn crossfade(&self, mutate: impl FnOnce()) {
         let imp = imp_with_cleared_callback(self);
-        let ghost = if animations_enabled() {
-            imp.capture()
-        } else {
-            None
-        };
+        if !animations_enabled() {
+            imp.halt();
+            mutate();
+            self.queue_resize();
+            return;
+        }
+        let ghost = imp.capture();
         mutate();
         let Some(ghost) = ghost else {
             return;
@@ -546,36 +632,43 @@ impl MorphBin {
     ) {
         let imp = imp_with_cleared_callback(self);
         if !animations_enabled() {
+            imp.halt();
             mutate();
-            imp.transform.take();
-            imp.ghost.take();
             self.queue_resize();
             return;
         }
-        // Interrupting a transform continues from the shape currently on screen.
+        // Interrupting a transform continues from the shape currently on screen, with
+        // the spring velocity kept (same direction) or reversed (opposite direction) so
+        // momentum stays continuous.
         let interrupted = imp
             .transform
             .borrow()
             .as_ref()
             .map(|transform| (transform.kind, transform.progress.velocity()));
-        let (origin, velocity) = match interrupted {
-            Some((previous, velocity)) if previous != kind && kind == TransformKind::Expand => {
-                (MorphOrigin::Local(imp.current_shape()), -velocity)
+        let (from, velocity) = match interrupted {
+            Some((previous, velocity)) => {
+                let shape = imp.current_shape();
+                let usable = shape.width > 0.0 && shape.height > 0.0;
+                let velocity = if previous == kind {
+                    velocity
+                } else {
+                    -velocity
+                };
+                (usable.then_some(shape), velocity)
             }
-            // A collapse interrupting an expand restarts from the full bounds toward
-            // `origin`; the reversed velocity keeps the momentum continuous.
-            Some((previous, velocity)) if previous != kind => (origin, -velocity),
-            _ => (origin, 0.0),
+            None => (None, 0.0),
         };
         let ghost = if capture { imp.capture() } else { None };
         mutate();
         *imp.ghost.borrow_mut() = ghost;
+        imp.crossfade.take();
         let mut progress = Spring::progress(params());
         progress.restart(0.0, 1.0, velocity);
         *imp.transform.borrow_mut() = Some(Transform {
             kind,
             origin,
             resolved: None,
+            from,
             capture,
             progress,
         });
@@ -597,18 +690,7 @@ impl MorphBin {
     pub fn cancel(&self) {
         let imp = self.imp();
         imp.settled.take();
-        if let Some(tick) = imp.tick.take() {
-            tick.remove();
-        }
-        for slot in [&imp.width, &imp.height] {
-            if let Some(spring) = slot.borrow_mut().as_mut() {
-                let target = spring.target();
-                spring.snap(target);
-            }
-        }
-        imp.transform.take();
-        imp.ghost.take();
-        imp.crossfade.take();
+        imp.halt();
         self.queue_resize();
     }
 
