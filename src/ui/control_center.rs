@@ -2147,11 +2147,16 @@ impl ControlCenterView {
             .monitor()
             .map_or(0, |monitor| monitor.geometry().width());
         let (_, panel_width, _, _) = self.panel_morph.measure(gtk::Orientation::Horizontal, -1);
-        let stage_width = stage::control_center_stage_width(panel_width, origin, monitor_width);
-        if !self.window.is_visible() {
-            self.stage_box.set_size_request(stage_width, -1);
+        let needed = stage::control_center_stage_width(panel_width, origin, monitor_width);
+        let visible = self.window.is_visible();
+        let current_request = self.stage_box.width_request();
+        let request = stage::stage_width_request(current_request, needed, visible);
+        if request != current_request {
+            self.stage_box.set_size_request(request, -1);
         }
-        let stage_width = self.stage_box.width_request().max(stage_width);
+        // The window is resizable, so a visible stage may be wider than its request.
+        let allocated = visible.then(|| self.stage_box.width());
+        let stage_width = stage::origin_stage_width(request, allocated);
         self.motion
             .present(panel_origin(origin, monitor_width, stage_width));
         sync_bluetooth_discovery(

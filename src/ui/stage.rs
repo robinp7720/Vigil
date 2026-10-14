@@ -41,6 +41,24 @@ pub fn control_center_stage_width(
     reach.clamp(1, available)
 }
 
+/// The stage's size request: it may shrink only while hidden, and grows whenever more
+/// width is needed (growing a right-anchored stage never moves the visible panel).
+pub fn stage_width_request(current_request: i32, needed: i32, visible: bool) -> i32 {
+    if visible {
+        current_request.max(needed)
+    } else {
+        needed
+    }
+}
+
+/// The width to map origins with: the allocated width when known, unless a just-grown
+/// request has not been allocated yet.
+pub fn origin_stage_width(requested: i32, allocated: Option<i32>) -> i32 {
+    allocated
+        .filter(|width| *width > 0)
+        .map_or(requested, |width| width.max(requested))
+}
+
 /// A stage anchored top-right with `SURFACE_MARGIN` margins.
 pub fn monitor_to_top_right_stage(
     rect: MorphRect,
@@ -134,6 +152,23 @@ mod tests {
         assert_eq!(control_center_stage_width(512, Some(far), 2560), 655);
         let beyond = MorphRect::new(-50.0, 9.0, 30.0, 28.0);
         assert_eq!(control_center_stage_width(512, Some(beyond), 1000), 990);
+    }
+
+    #[test]
+    fn stage_requests_shrink_only_while_hidden() {
+        assert_eq!(stage_width_request(800, 512, false), 512);
+        assert_eq!(stage_width_request(512, 800, false), 800);
+        assert_eq!(stage_width_request(800, 512, true), 800);
+        assert_eq!(stage_width_request(512, 800, true), 800);
+    }
+
+    #[test]
+    fn origins_map_with_the_real_stage_width_when_known() {
+        assert_eq!(origin_stage_width(800, None), 800);
+        assert_eq!(origin_stage_width(800, Some(0)), 800);
+        assert_eq!(origin_stage_width(512, Some(640)), 640);
+        // A just-grown request wins over the stale, narrower allocation.
+        assert_eq!(origin_stage_width(800, Some(512)), 800);
     }
 
     #[test]
