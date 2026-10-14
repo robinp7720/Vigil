@@ -734,23 +734,48 @@ struct NavigationUi {
     errors: Rc<RefCell<ControlCenterErrors>>,
     pending: Rc<RefCell<BTreeMap<ControlCenterFocus, usize>>>,
     page_changed: PageChanged,
+    page_morph: MorphBin,
+    heading_morph: MorphBin,
+    return_origin: Rc<Cell<Option<MorphRect>>>,
 }
 
 type PageChanged = Rc<RefCell<Option<Rc<dyn Fn(ControlCenterFocus)>>>>;
 
 impl NavigationUi {
     fn navigate(&self, page: ControlCenterFocus, backwards: bool) {
+        self.navigate_with(page, backwards, None);
+    }
+
+    /// Expands the page out of the activated tile (window coordinates).
+    fn navigate_from(&self, page: ControlCenterFocus, origin: MorphRect) {
+        self.navigate_with(page, false, Some(origin));
+    }
+
+    fn navigate_with(&self, page: ControlCenterFocus, backwards: bool, origin: Option<MorphRect>) {
+        let previous = self.page.get();
         self.page.set(page);
-        self.stack.set_transition_type(if backwards {
-            gtk::StackTransitionType::SlideRight
+        let show = || self.stack.set_visible_child_name(page.as_str());
+        if previous == page || !self.page_morph.is_mapped() {
+            self.return_origin.set(None);
+            self.page_morph.cancel();
+            show();
+        } else if let Some(origin) = origin {
+            self.return_origin.set(Some(origin));
+            self.page_morph
+                .expand_from(MorphOrigin::Window(origin), true, show);
+        } else if let (true, Some(origin)) = (backwards, self.return_origin.take()) {
+            self.page_morph
+                .collapse_into(MorphOrigin::Window(origin), true, show);
         } else {
-            gtk::StackTransitionType::SlideLeft
-        });
-        self.stack.set_visible_child_name(page.as_str());
+            self.return_origin.set(None);
+            self.page_morph.crossfade(show);
+        }
         self.back_button
             .set_visible(page != ControlCenterFocus::Overview);
-        self.title.set_label(page.title());
-        self.subtitle.set_label(page.subtitle());
+        self.heading_morph.crossfade(|| {
+            self.title.set_label(page.title());
+            self.subtitle.set_label(page.subtitle());
+        });
         self.footer_label
             .set_label(&format!("Open {} in Luma", page.title()));
         self.footer.set_visible(page != ControlCenterFocus::AiUsage);
@@ -1423,14 +1448,21 @@ impl ControlCenterView {
         close_button.set_has_frame(false);
         close_button.add_css_class("control-close");
         header.append(&back_button);
-        header.append(&heading_text);
+        let heading_morph = MorphBin::new();
+        heading_morph.set_hexpand(true);
+        heading_morph.set_child(Some(&heading_text));
+        header.append(&heading_morph);
         header.append(&clock);
         header.append(&close_button);
         root.append(&header);
 
         let stack = gtk::Stack::new();
         stack.add_css_class("control-stack");
-        stack.set_transition_duration(180);
+        stack.set_transition_type(gtk::StackTransitionType::None);
+        let page_morph = MorphBin::new();
+        page_morph.set_follow(false, true);
+        page_morph.set_radius(stage::CARD_RADIUS);
+        page_morph.set_child(Some(&stack));
         stack.set_hhomogeneous(true);
         stack.set_vhomogeneous(false);
 
@@ -1477,6 +1509,9 @@ impl ControlCenterView {
             errors: errors.clone(),
             pending: Rc::new(RefCell::new(BTreeMap::new())),
             page_changed: Rc::new(RefCell::new(None)),
+            page_morph: page_morph.clone(),
+            heading_morph: heading_morph.clone(),
+            return_origin: Rc::new(Cell::new(None)),
         };
 
         let current = Rc::new(RefCell::new(spec.clone()));
@@ -1757,7 +1792,7 @@ impl ControlCenterView {
             }
         }));
 
-        root.append(&stack);
+        root.append(&page_morph);
         root.append(&error_slot);
         root.append(&footer);
 
@@ -2553,7 +2588,16 @@ fn tile_body(icon_name: &str, title: &str) -> TileBody {
 
 fn connect_navigation(button: &gtk::Button, page: ControlCenterFocus, navigation: &NavigationUi) {
     let navigation = navigation.clone();
-    button.connect_clicked(move |_| navigation.navigate(page, false));
+    button.connect_clicked(move |button| {
+        let origin = button.root().and_then(|root| button.compute_bounds(&root));
+        match origin {
+            Some(bounds) => navigation.navigate_from(
+                page,
+                MorphRect::new(bounds.x(), bounds.y(), bounds.width(), bounds.height()),
+            ),
+            None => navigation.navigate(page, false),
+        }
+    });
 }
 
 fn section_eyebrow(text: &str) -> gtk::Label {
