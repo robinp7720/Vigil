@@ -1383,7 +1383,6 @@ impl ControlCenterView {
             .title("Vigil Quick Settings")
             .build();
         window.set_decorated(false);
-        window.set_resizable(false);
         window.set_default_size(512, -1);
         window.add_css_class("control-center-window");
         window.init_layer_shell();
@@ -1783,7 +1782,15 @@ impl ControlCenterView {
                     .upgrade()
                     .and_then(|panel| {
                         let root = panel.root()?;
-                        panel.shape_in(&root)
+                        let shape = panel.shape_in(&root)?;
+                        // Never take pointer focus outside the resting panel (e.g. over the bar).
+                        let bounds = panel.compute_bounds(&root)?;
+                        shape.intersection(MorphRect::new(
+                            bounds.x(),
+                            bounds.y(),
+                            bounds.width(),
+                            bounds.height(),
+                        ))
                     })
                     .into_iter()
                     .collect()
@@ -1994,6 +2001,28 @@ impl ControlCenterView {
             }
         });
         window.add_controller(escape);
+
+        // The compositor can leave pointer focus on the stage after it opens under a still
+        // pointer; a press outside the panel then dismisses it, like clicking the opener again.
+        let away = gtk::GestureClick::new();
+        away.set_button(1);
+        let motion_for_away = motion.clone();
+        let panel_for_away = panel_morph.downgrade();
+        away.connect_pressed(move |gesture, _, x, y| {
+            let Some(panel) = panel_for_away.upgrade() else {
+                return;
+            };
+            let inside = gesture
+                .widget()
+                .and_then(|widget| panel.compute_bounds(&widget))
+                .is_some_and(|bounds| {
+                    bounds.contains_point(&gtk::graphene::Point::new(x as f32, y as f32))
+                });
+            if !inside {
+                motion_for_away.dismiss();
+            }
+        });
+        window.add_controller(away);
 
         let media_widgets = vec![overview_media, detail_media];
         let artwork = ArtworkController::new(&window, &media_widgets);

@@ -150,6 +150,15 @@ impl MorphRect {
         }
     }
 
+    /// Overlapping area of two rects, or `None` when they do not overlap.
+    pub fn intersection(self, other: Self) -> Option<Self> {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let right = (self.x + self.width).min(other.x + other.width);
+        let bottom = (self.y + self.height).min(other.y + other.height);
+        (right > x && bottom > y).then(|| Self::new(x, y, right - x, bottom - y))
+    }
+
     pub fn translated(self, dx: f32, dy: f32) -> Self {
         Self {
             x: self.x + dx,
@@ -209,6 +218,21 @@ pub fn motion_style() -> MotionStyle {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rect_intersection_covers_overlap_containment_and_disjoint() {
+        use super::MorphRect;
+        let a = MorphRect::new(0.0, 0.0, 100.0, 100.0);
+        assert_eq!(
+            a.intersection(MorphRect::new(50.0, 60.0, 100.0, 100.0)),
+            Some(MorphRect::new(50.0, 60.0, 50.0, 40.0))
+        );
+        let inner = MorphRect::new(10.0, 10.0, 20.0, 20.0);
+        assert_eq!(a.intersection(inner), Some(inner));
+        assert_eq!(inner.intersection(a), Some(inner));
+        assert_eq!(a.intersection(MorphRect::new(200.0, 0.0, 10.0, 10.0)), None);
+        assert_eq!(a.intersection(MorphRect::new(100.0, 0.0, 10.0, 10.0)), None);
+    }
+
     use super::*;
     use crate::MotionStyle;
 

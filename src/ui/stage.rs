@@ -76,6 +76,10 @@ pub fn toast_origin(
 pub fn track_input(window: &gtk::ApplicationWindow, shapes: impl Fn() -> Vec<MorphRect> + 'static) {
     let shapes = std::rc::Rc::new(shapes);
     window.connect_realize(move |window| {
+        // Start empty so the first commit never grabs pointer focus from the bar below.
+        if let Some(surface) = window.surface() {
+            surface.set_input_region(&cairo::Region::create());
+        }
         let Some(clock) = window.frame_clock() else {
             return;
         };
