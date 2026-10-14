@@ -77,6 +77,56 @@ pub struct ContextSpec {
     pub critical_snooze_seconds: u64,
 }
 
+/// What the island shows, ignoring text and values that refresh in place (timer ticks,
+/// `now_epoch`, battery percent). The island crossfades only when this changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ContextIdentity {
+    content: ContextContent,
+    suggestion: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ContextContent {
+    Title,
+    Card(String),
+    Suggestion(String),
+}
+
+pub(super) fn context_identity(
+    context: Option<&ContextSpec>,
+    suggestion: Option<&Suggestion>,
+) -> ContextIdentity {
+    let content = match (context, suggestion) {
+        (Some(context), _) => ContextContent::Card(card_identity(&context.card)),
+        (None, Some(suggestion)) => ContextContent::Suggestion(suggestion.id.clone()),
+        (None, None) => ContextContent::Title,
+    };
+    ContextIdentity {
+        content,
+        suggestion: suggestion.map(|suggestion| suggestion.id.clone()),
+    }
+}
+
+fn card_identity(card: &ContextCard) -> String {
+    match card {
+        ContextCard::Battery { .. } => "battery".to_string(),
+        ContextCard::Calendar { id, .. } => format!("calendar|{id}"),
+        ContextCard::Timer { id, .. } => format!("timer|{id}"),
+        ContextCard::Activity { id, .. } => format!("activity|{id}"),
+        ContextCard::Media { player, .. } => format!("media|{player}"),
+        ContextCard::Urgent {
+            output,
+            workspace,
+            window_id,
+            ..
+        } => format!(
+            "urgent|{output}|{}|{}",
+            workspace.as_deref().unwrap_or_default(),
+            window_id.as_deref().unwrap_or_default()
+        ),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WarningSpec {
     pub text: String,
@@ -755,9 +805,22 @@ fn toast_changes(previous: &[Notification], next: &[Notification]) -> ToastChang
             .collect(),
         replaced: next
             .iter()
-            .filter(|item| find(previous, item.id).is_some_and(|old| old != **item))
+            .filter(|item| {
+                find(previous, item.id)
+                    .is_some_and(|old| toast_render_key(&old) != toast_render_key(item))
+            })
             .map(|item| item.id)
             .collect(),
+    }
+}
+
+/// The fields a toast card renders: expiry refreshes (hover-leave) and receipt times do
+/// not change the card, so they must not rebuild and crossfade it.
+fn toast_render_key(notification: &Notification) -> Notification {
+    Notification {
+        received_at: 0,
+        expires_at: None,
+        ..notification.clone()
     }
 }
 
@@ -1317,7 +1380,13 @@ impl PrimarySurface {
         }
 
         if plan.context {
-            self.context_morph.crossfade(|| {
+            // Text and value refreshes (timer ticks, `now_epoch`) apply in place; the
+            // width still springs through measure. Only new content crossfades.
+            let crossfade = self.current_spec.as_ref().is_some_and(|previous| {
+                context_identity(previous.context.as_ref(), previous.suggestion.as_ref())
+                    != context_identity(spec.context.as_ref(), spec.suggestion.as_ref())
+            });
+            let apply = || {
                 *self.current_context.borrow_mut() = spec.context.clone();
                 *self.current_suggestion.borrow_mut() = spec.suggestion.clone();
                 self.suggestion_action.remove_css_class("is-pending");
@@ -1367,7 +1436,12 @@ impl PrimarySurface {
                     self.context_stack.set_visible_child_name("title");
                     self.context_media_controls.set_visible(false);
                 }
-            });
+            };
+            if crossfade {
+                self.context_morph.crossfade(apply);
+            } else {
+                apply();
+            }
         }
 
         self.current_spec = Some(spec.clone());
@@ -2911,6 +2985,83 @@ mod tests {
             }
         );
         assert_eq!(toast_changes(&next, &next), ToastChanges::default());
+    }
+
+    #[test]
+    fn toast_expiry_refreshes_are_not_replacements() {
+        use super::{ToastChanges, toast_changes};
+
+        let previous = vec![crate::Notification {
+            id: 7,
+            summary: "Build finished".to_string(),
+            received_at: 100,
+            expires_at: Some(105),
+            ..crate::Notification::default()
+        }];
+        let next = vec![crate::Notification {
+            received_at: 101,
+            expires_at: Some(112),
+            ..previous[0].clone()
+        }];
+        assert_eq!(toast_changes(&previous, &next), ToastChanges::default());
+    }
+
+    fn timer_context(id: &str, remaining_seconds: u64, now_epoch: i64) -> super::ContextSpec {
+        super::ContextSpec {
+            card: crate::ContextCard::Timer {
+                id: id.to_string(),
+                label: "Tea".to_string(),
+                remaining_seconds,
+                target_epoch: Some(now_epoch + i64::try_from(remaining_seconds).unwrap()),
+                completed: false,
+                tier: crate::ContextTier::Work,
+            },
+            icon_name: "alarm-symbolic".to_string(),
+            text: format!("Tea {remaining_seconds}s"),
+            tier: crate::ContextTier::Work,
+            now_epoch,
+            critical_snooze_seconds: 300,
+        }
+    }
+
+    #[test]
+    fn timer_ticks_do_not_crossfade_the_island() {
+        use super::context_identity;
+
+        let previous = timer_context("tea", 60, 1_000);
+        let next = timer_context("tea", 59, 1_001);
+        assert_eq!(
+            context_identity(Some(&previous), None),
+            context_identity(Some(&next), None)
+        );
+    }
+
+    #[test]
+    fn showing_or_switching_context_crossfades_the_island() {
+        use super::context_identity;
+
+        let timer = timer_context("tea", 60, 1_000);
+        assert_ne!(
+            context_identity(None, None),
+            context_identity(Some(&timer), None)
+        );
+        let battery = super::ContextSpec {
+            card: crate::ContextCard::Battery {
+                percent: 9,
+                charging: false,
+                tier: crate::ContextTier::Critical,
+            },
+            ..timer.clone()
+        };
+        assert_ne!(
+            context_identity(Some(&timer), None),
+            context_identity(Some(&battery), None)
+        );
+        let other_timer = timer_context("pasta", 60, 1_000);
+        assert_ne!(
+            context_identity(Some(&timer), None),
+            context_identity(Some(&other_timer), None)
+        );
     }
 
     #[test]

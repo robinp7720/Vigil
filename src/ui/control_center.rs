@@ -772,10 +772,12 @@ impl NavigationUi {
         }
         self.back_button
             .set_visible(page != ControlCenterFocus::Overview);
-        self.heading_morph.crossfade(|| {
-            self.title.set_label(page.title());
-            self.subtitle.set_label(page.subtitle());
-        });
+        if previous != page {
+            self.heading_morph.crossfade(|| {
+                self.title.set_label(page.title());
+                self.subtitle.set_label(page.subtitle());
+            });
+        }
         self.footer_label
             .set_label(&format!("Open {} in Luma", page.title()));
         self.footer.set_visible(page != ControlCenterFocus::AiUsage);
