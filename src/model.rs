@@ -171,7 +171,7 @@ pub struct NotificationAction {
     pub label: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Notification {
     pub id: u32,
     pub app_name: String,

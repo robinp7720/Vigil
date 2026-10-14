@@ -26,9 +26,9 @@ use super::control_center::{
     ControlCenterFocus, ControlCenterView, NotificationPresentation, notification_row,
 };
 use super::morph::{self, MorphRect};
-use super::morph_bin::MorphBin;
+use super::morph_bin::{MorphBin, MorphOrigin, MorphShadow};
 use super::popovers::PopoverCoordinator;
-use super::stage::{self, BAR_HEIGHT, NOTIFICATION_GAP, SURFACE_MARGIN};
+use super::stage::{self, BAR_HEIGHT, SURFACE_MARGIN};
 use super::system::{SystemButtonSpec, SystemCluster, SystemModuleId, build_system_cluster};
 use super::wm::{WindowGroupSpec, select_primary_output, title_for_output, window_groups};
 
@@ -317,11 +317,20 @@ impl ManagedOverlay {
 
 type PopoverRegistry = Rc<RefCell<BTreeMap<String, ManagedOverlay>>>;
 
+struct ToastRow {
+    morph: MorphBin,
+    notification: Notification,
+}
+
+type ToastRows = Rc<RefCell<BTreeMap<u32, ToastRow>>>;
+
 struct NotificationStackHandle {
     window: gtk::ApplicationWindow,
     content: gtk::Box,
+    rows: ToastRows,
     notifications: Vec<Notification>,
     width: i32,
+    output: String,
 }
 
 pub struct SurfaceRegistry {
@@ -423,12 +432,6 @@ impl SurfaceRegistry {
                     .cloned()
             })
             .collect::<Vec<_>>();
-        if notifications.is_empty() {
-            if let Some(stack) = self.notification_stack.take() {
-                stack.window.close();
-            }
-            return;
-        }
         let focused_output = snapshot
             .focused_output
             .as_deref()
@@ -440,57 +443,108 @@ impl SurfaceRegistry {
         let Some(monitor) = monitors.get(focused_output) else {
             return;
         };
-        let width = notification_stack_width(monitor.geometry().width());
-        if self.notification_stack.is_none() {
-            let window = gtk::ApplicationWindow::builder()
-                .application(application)
-                .title("Vigil Notifications")
-                .build();
-            window.set_decorated(false);
-            window.set_resizable(false);
-            window.set_default_size(width, -1);
-            window.add_css_class("notification-window");
-            window.init_layer_shell();
-            window.set_namespace(Some("vigil-notifications"));
-            window.set_layer(Layer::Overlay);
-            window.set_anchor(Edge::Top, true);
-            window.set_anchor(Edge::Right, true);
-            // Layer-shell positions overlays inside the work area reserved by the bar.
-            window.set_margin(Edge::Top, NOTIFICATION_GAP);
-            window.set_margin(Edge::Right, 12);
-            window.set_exclusive_zone(0);
-            window.set_monitor(Some(monitor));
-            let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
-            content.add_css_class("notification-stack");
-            window.set_child(Some(&content));
-            window.present();
-            self.notification_stack = Some(NotificationStackHandle {
-                window,
-                content,
-                notifications: Vec::new(),
-                width,
-            });
-        }
-        let Some(stack) = self.notification_stack.as_mut() else {
-            return;
+        let monitor_width = monitor.geometry().width();
+        let width = notification_stack_width(monitor_width);
+        let island = match self.surfaces.get(focused_output) {
+            Some(SurfaceHandle::Primary(surface)) => surface.island_rect(),
+            _ => None,
         };
-        stack.window.set_monitor(Some(monitor));
-        stack.window.set_default_size(width, -1);
-        if stack.notifications != notifications || stack.width != width {
-            while let Some(child) = stack.content.first_child() {
-                stack.content.remove(&child);
-            }
-            for notification in &notifications {
-                stack.content.append(&notification_row(
+        let origin = stage::toast_origin(island, monitor_width, width);
+
+        // Output or width changes rebuild the stack without motion.
+        let stale = self
+            .notification_stack
+            .as_ref()
+            .is_some_and(|stack| stack.output != focused_output || stack.width != width);
+        if stale && let Some(stack) = self.notification_stack.take() {
+            stack.window.close();
+        }
+        if notifications.is_empty() && self.notification_stack.is_none() {
+            return;
+        }
+        let animate = !stale;
+        let stack = self.notification_stack.get_or_insert_with(|| {
+            new_notification_stack(application, monitor, width, focused_output)
+        });
+
+        let changes = toast_changes(&stack.notifications, &notifications);
+        for id in &changes.removed {
+            remove_toast(stack, *id, origin, animate);
+        }
+        for notification in &notifications {
+            if changes.inserted.contains(&notification.id) {
+                let morph = MorphBin::new();
+                morph.set_follow(false, true);
+                morph.set_start_collapsed(animate);
+                morph.set_radius(stage::CARD_RADIUS);
+                morph.set_shadow(Some(MorphShadow {
+                    dy: 8.0,
+                    blur: 24.0,
+                    alpha: 0.30,
+                }));
+                morph.set_child(Some(&toast_widget(
                     notification,
                     self.notification_control.as_ref(),
-                    NotificationPresentation::Toast {
-                        stack_width: u32::try_from(width).unwrap_or(400),
+                    width,
+                )));
+                stack.content.append(&morph);
+                if animate {
+                    morph.expand_from(MorphOrigin::Window(origin), false, || {});
+                }
+                stack.rows.borrow_mut().insert(
+                    notification.id,
+                    ToastRow {
+                        morph,
+                        notification: notification.clone(),
                     },
-                ));
+                );
+            } else if changes.replaced.contains(&notification.id)
+                && let Some(row) = stack.rows.borrow_mut().get_mut(&notification.id)
+            {
+                let widget = toast_widget(notification, self.notification_control.as_ref(), width);
+                row.morph.crossfade(|| row.morph.set_child(Some(&widget)));
+                row.notification = notification.clone();
             }
-            stack.notifications = notifications;
-            stack.width = width;
+        }
+        // Order live rows like `notifications`; leaving rows stay where they are unless the
+        // live rows themselves are out of order (a new row goes to the top).
+        let desired = notifications
+            .iter()
+            .filter_map(|notification| {
+                stack
+                    .rows
+                    .borrow()
+                    .get(&notification.id)
+                    .map(|row| row.morph.clone())
+            })
+            .collect::<Vec<_>>();
+        let mut current = Vec::new();
+        let mut child = stack.content.first_child();
+        while let Some(widget) = child {
+            if desired
+                .iter()
+                .any(|morph| morph.upcast_ref::<gtk::Widget>() == &widget)
+            {
+                current.push(widget.clone());
+            }
+            child = widget.next_sibling();
+        }
+        let in_order = current.len() == desired.len()
+            && current
+                .iter()
+                .zip(&desired)
+                .all(|(widget, morph)| widget == morph.upcast_ref::<gtk::Widget>());
+        if !in_order {
+            let mut previous: Option<gtk::Widget> = None;
+            for morph in &desired {
+                stack.content.reorder_child_after(morph, previous.as_ref());
+                previous = Some(morph.clone().upcast());
+            }
+        }
+        stack.notifications = notifications;
+        if !stack.notifications.is_empty() && !stack.window.is_visible() {
+            stack.window.set_monitor(Some(monitor));
+            stack.window.present();
         }
     }
 
@@ -677,6 +731,142 @@ impl SurfaceRegistry {
             }
         }
     }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct ToastChanges {
+    pub removed: Vec<u32>,
+    pub inserted: Vec<u32>,
+    pub replaced: Vec<u32>,
+}
+
+fn toast_changes(previous: &[Notification], next: &[Notification]) -> ToastChanges {
+    let find = |items: &[Notification], id: u32| items.iter().find(|item| item.id == id).cloned();
+    ToastChanges {
+        removed: previous
+            .iter()
+            .filter(|item| find(next, item.id).is_none())
+            .map(|item| item.id)
+            .collect(),
+        inserted: next
+            .iter()
+            .filter(|item| find(previous, item.id).is_none())
+            .map(|item| item.id)
+            .collect(),
+        replaced: next
+            .iter()
+            .filter(|item| find(previous, item.id).is_some_and(|old| old != **item))
+            .map(|item| item.id)
+            .collect(),
+    }
+}
+
+fn new_notification_stack(
+    application: &gtk::Application,
+    monitor: &gdk::Monitor,
+    width: i32,
+    output: &str,
+) -> NotificationStackHandle {
+    let window = gtk::ApplicationWindow::builder()
+        .application(application)
+        .title("Vigil Notifications")
+        .build();
+    window.set_decorated(false);
+    window.set_default_size(width, -1);
+    window.add_css_class("notification-window");
+    window.init_layer_shell();
+    window.set_namespace(Some("vigil-notifications"));
+    window.set_layer(Layer::Overlay);
+    // Anchored to the top only: the window is as tall as the stack (plus room above it
+    // for the morph out of the island) so it never covers more than the cards.
+    window.set_anchor(Edge::Top, true);
+    window.set_anchor(Edge::Bottom, true);
+    window.set_margin(Edge::Top, SURFACE_MARGIN);
+    window.set_margin(Edge::Bottom, SURFACE_MARGIN);
+    window.set_exclusive_zone(-1);
+    window.set_monitor(Some(monitor));
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    content.add_css_class("notification-stack");
+    content.set_valign(gtk::Align::Start);
+    content.set_margin_top(stage::toast_top_in_stage());
+    content.set_size_request(width, -1);
+    window.set_child(Some(&content));
+    let rows: ToastRows = Rc::new(RefCell::new(BTreeMap::new()));
+    {
+        let content = content.downgrade();
+        let window_ref = window.downgrade();
+        stage::track_input(&window, move || {
+            let (Some(content), Some(window)) = (content.upgrade(), window_ref.upgrade()) else {
+                return Vec::new();
+            };
+            let mut shapes = Vec::new();
+            let mut child = content.first_child();
+            while let Some(widget) = child {
+                if let Some(morph) = widget.downcast_ref::<MorphBin>()
+                    && let Some(shape) = morph.shape_in(&window)
+                {
+                    shapes.push(shape);
+                }
+                child = widget.next_sibling();
+            }
+            shapes
+        });
+    }
+    window.present();
+    NotificationStackHandle {
+        window,
+        content,
+        rows,
+        notifications: Vec::new(),
+        width,
+        output: output.to_string(),
+    }
+}
+
+fn toast_widget(
+    notification: &Notification,
+    control: Option<&NotificationControl>,
+    width: i32,
+) -> gtk::Box {
+    notification_row(
+        notification,
+        control,
+        NotificationPresentation::Toast {
+            stack_width: u32::try_from(width).unwrap_or(400),
+        },
+    )
+}
+
+/// Collapses a toast back into the island while its slot springs shut, then removes it.
+fn remove_toast(stack: &NotificationStackHandle, id: u32, origin: MorphRect, animate: bool) {
+    let Some(row) = stack.rows.borrow_mut().remove(&id) else {
+        return;
+    };
+    let content = stack.content.clone();
+    let window = stack.window.downgrade();
+    let morph = row.morph;
+    let finish = {
+        let morph = morph.clone();
+        move || {
+            content.remove(&morph);
+            if content.first_child().is_none()
+                && let Some(window) = window.upgrade()
+            {
+                window.set_visible(false);
+            }
+        }
+    };
+    if !animate {
+        finish();
+        return;
+    }
+    let child = morph.child();
+    morph.collapse_into(MorphOrigin::Window(origin), true, || {
+        if let Some(child) = child {
+            child.set_visible(false);
+        }
+    });
+    morph.on_settled(finish);
 }
 
 fn notification_stack_width(monitor_width: i32) -> i32 {
@@ -2699,6 +2889,28 @@ mod tests {
     fn bar_window_width_matches_monitor_width_minus_layer_margins() {
         assert_eq!(super::bar_window_width_for_monitor_width(3_840), 3_830);
         assert_eq!(super::bar_window_width_for_monitor_width(1), 1);
+    }
+
+    #[test]
+    fn toast_changes_are_keyed_by_notification_id() {
+        use super::{ToastChanges, toast_changes};
+
+        let make = |id: u32, summary: &str| crate::Notification {
+            id,
+            summary: summary.to_string(),
+            ..crate::Notification::default()
+        };
+        let previous = vec![make(1, "a"), make(2, "b"), make(3, "c")];
+        let next = vec![make(4, "d"), make(2, "b2"), make(1, "a")];
+        assert_eq!(
+            toast_changes(&previous, &next),
+            ToastChanges {
+                removed: vec![3],
+                inserted: vec![4],
+                replaced: vec![2],
+            }
+        );
+        assert_eq!(toast_changes(&next, &next), ToastChanges::default());
     }
 
     #[test]
