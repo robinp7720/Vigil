@@ -9,6 +9,7 @@ use super::control_center::{ControlCenterSpec, build_control_center_spec, keyboa
 pub enum SystemModuleId {
     Keyboard,
     Resources,
+    AiUsage,
     Network,
     Bluetooth,
     Audio,
@@ -22,6 +23,7 @@ impl SystemModuleId {
         match self {
             Self::Keyboard => "keyboard",
             Self::Resources => "resources",
+            Self::AiUsage => "ai-usage",
             Self::Network => "network",
             Self::Bluetooth => "bluetooth",
             Self::Audio => "audio",
@@ -35,6 +37,7 @@ impl SystemModuleId {
         match name {
             ModuleName::KeyboardLayout => Some(Self::Keyboard),
             ModuleName::Resources => Some(Self::Resources),
+            ModuleName::AiUsage => Some(Self::AiUsage),
             ModuleName::Network => Some(Self::Network),
             ModuleName::Bluetooth => Some(Self::Bluetooth),
             ModuleName::BluetoothAudio => Some(Self::Audio),
@@ -118,6 +121,7 @@ fn build_button_spec(
     match id {
         SystemModuleId::Keyboard => keyboard_button(snapshot),
         SystemModuleId::Resources => resources_button(snapshot),
+        SystemModuleId::AiUsage => ai_usage_button(snapshot),
         SystemModuleId::Network => network_button(snapshot),
         SystemModuleId::Bluetooth => bluetooth_button(snapshot),
         SystemModuleId::Audio => audio_button(snapshot),
@@ -143,6 +147,23 @@ fn keyboard_button(snapshot: &BarSnapshot) -> SystemButtonSpec {
             format!("Keyboard layout: {layout}"),
             snapshot.system.source_health.get(&SourceId::Compositor),
         ),
+        classes,
+    }
+}
+
+pub(super) fn ai_usage_button(snapshot: &BarSnapshot) -> SystemButtonSpec {
+    let usage = &snapshot.system.ai_usage;
+    let health = snapshot.system.source_health.get(&SourceId::AiUsage);
+    let mut classes = base_classes(SystemModuleId::AiUsage);
+    if !usage.codex.available && !usage.claude.available {
+        classes.push("inactive".to_string());
+    }
+    apply_health(&mut classes, health);
+    SystemButtonSpec {
+        id: SystemModuleId::AiUsage,
+        icon_name: "applications-science-symbolic".to_string(),
+        label: Some(super::ai_usage::label(usage, health)),
+        tooltip: with_health_note(super::ai_usage::detail(usage, health), health),
         classes,
     }
 }

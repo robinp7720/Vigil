@@ -1,3 +1,4 @@
+mod ai_usage;
 mod artwork;
 pub mod context_card;
 pub mod control_center;
@@ -183,6 +184,12 @@ pub fn run_preview(config_path: &Path, scenario: &str) -> Result<()> {
         if scenario == "control-center" {
             surfaces.open_control_center(crate::DesktopContext::Overview, Some(&primary));
         }
+        if scenario == "ai-usage" {
+            surfaces.open_control_center_page(
+                control_center::ControlCenterFocus::AiUsage,
+                Some(&primary),
+            );
+        }
         *registry_for_activate.borrow_mut() = Some(surfaces);
     });
 
@@ -317,6 +324,49 @@ fn preview_snapshot(connectors: &[String], scenario: &str, now_epoch: i64) -> cr
     };
 
     match scenario {
+        "ai-usage" => {
+            snapshot.system.ai_usage = crate::AiUsageState {
+                day: "Preview data".to_string(),
+                codex: crate::AiProviderUsage {
+                    available: true,
+                    tokens: crate::TokenUsage {
+                        input_tokens: 2_700_000,
+                        cached_input_tokens: 2_100_000,
+                        output_tokens: 300_000,
+                        reasoning_output_tokens: 120_000,
+                        total_tokens: 3_000_000,
+                        ..crate::TokenUsage::default()
+                    },
+                    last_event_at: Some(now_epoch),
+                    quotas: vec![crate::AiQuota {
+                        used_percent: 43,
+                        window_minutes: 10080,
+                        resets_at: Some(now_epoch + 2 * 86400),
+                        estimate: crate::AiQuotaEstimate::Available {
+                            remaining_seconds: 3 * 3600,
+                            exhausts_at: now_epoch + 3 * 3600,
+                            sample_seconds: 3600,
+                            used_percent_delta: 19,
+                            lasts_until_reset: Some(false),
+                        },
+                    }],
+                    quota_observed_at: Some(now_epoch),
+                },
+                claude: crate::AiProviderUsage {
+                    available: true,
+                    tokens: crate::TokenUsage {
+                        input_tokens: 850_000,
+                        cached_input_tokens: 500_000,
+                        cache_write_input_tokens: 100_000,
+                        output_tokens: 150_000,
+                        total_tokens: 1_000_000,
+                        ..crate::TokenUsage::default()
+                    },
+                    last_event_at: Some(now_epoch - 60),
+                    ..crate::AiProviderUsage::default()
+                },
+            };
+        }
         "escalation" => {
             snapshot.system.power.battery_percent = Some(6);
         }
@@ -517,6 +567,7 @@ fn start_runtime(config: AppConfig, config_path: &Path) -> Result<(UiRuntime, Ru
     let mut joins = vec![
         spawn_compositor_worker(state_tx.clone(), Arc::clone(&cancelled)),
         spawn_resource_source(state_tx.clone(), Arc::clone(&cancelled)),
+        crate::spawn_ai_usage_source(state_tx.clone(), Arc::clone(&cancelled)),
         spawn_power_source(state_tx.clone(), Arc::clone(&cancelled)),
         spawn_network_source(state_tx.clone(), Arc::clone(&cancelled)),
         bluetooth_join,

@@ -68,6 +68,41 @@ available to the urgency card and lock screen.
 The calendar's weekday/month names follow the system locale by default; set `locale` in
 `config.toml` (e.g. `locale = "de_DE.UTF-8"`) to override it independently of the environment.
 
+## AI token usage
+
+The `ai_usage` module shows today's combined Codex and Claude Code token count on
+the primary bar. Hover for provider totals; click for a dedicated graphical
+breakdown with a provider-share ring, stacked token-composition bars, and Codex
+quota meters. Hover a count for its exact value. The same page is linked from
+System Resources. Days follow the computer's local timezone.
+
+Quota cards estimate time left at the recent consumption pace and compare it
+with the next reset. The earliest estimated exhaustion before a reset also
+appears beside the bar's token count. The estimate uses reported quota percentage
+changes over the last hour, requiring at least 15 minutes and two percentage
+points of change. It reconstructs from logs after restart and across midnight;
+different quota windows and resets are kept separate. Reports older than 15
+minutes pause the estimate, and flat usage is not treated as unlimited time.
+These are approximate forecasts assuming the recent pace continues. Claude's
+local logs lack quota data, so its remaining-time estimate is unavailable.
+
+Vigil reads local JSONL session records every 15 seconds from
+`${CODEX_HOME:-~/.codex}/{sessions,archived_sessions}` and
+`${CLAUDE_CONFIG_DIR:-~/.claude}/projects`, including subagent logs. It reads new
+bytes incrementally, deduplicates repeated usage reports, and handles sessions
+resumed across midnight. No credentials or network access are needed. The module
+does not store prompts or responses.
+
+Totals include cached input; reasoning is already included in Codex output.
+These are locally recorded tokens, not billing totals or an account-wide usage
+meter. Codex quota information is labeled with its report time; Claude's session
+records do not provide account quota information. A provider with no activity
+today shows zero; missing logs are marked unavailable.
+
+Run `vigil ai-usage` for the same daily accounting as JSON. Remove `"ai_usage"`
+from `[modules].full` to hide the indicator. Custom provider homes must be in the
+environment of `vigil.service` as well as any interactive shell.
+
 ## Native notifications
 
 Vigil owns `org.freedesktop.Notifications`. New notifications appear in a measured
@@ -108,6 +143,7 @@ For deterministic visual review in a graphical Wayland session:
 ```bash
 cargo run -- --config ../../bar/config.toml __preview --scenario suggestion
 cargo run -- --config ../../bar/config.toml __preview --scenario control-center
+cargo run -- --config ../../bar/config.toml __preview --scenario ai-usage
 ```
 
 ## Migration from Cockpit Bar

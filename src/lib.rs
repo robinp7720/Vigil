@@ -39,8 +39,9 @@ pub use integration::{
 };
 pub use ipc::{ControlClient, ControlRequest, ControlResponse, ControlSocket, control_socket_path};
 pub use model::{
-    ActionIntent, ActivityState, ActivityStatus, ActivityUpdate, AudioOutputState, AudioState,
-    BarSnapshot, BluetoothDeviceOperation, BluetoothDeviceState, BluetoothPairingPrompt,
+    ActionIntent, ActivityState, ActivityStatus, ActivityUpdate, AiProviderUsage, AiQuota,
+    AiQuotaEstimate, AiUsageState, AudioOutputState, AudioState, BarSnapshot,
+    BluetoothDeviceOperation, BluetoothDeviceState, BluetoothPairingPrompt,
     BluetoothPairingPromptKind, BluetoothPairingResponse, BluetoothState, BrightnessState,
     CalendarAgenda, CalendarAgendaEvent, CalendarEvent, ClockState, CommandActivity,
     ConnectivityState, ContextAction, ContextActionSpec, ContextHealth, ContextSnapshot,
@@ -48,15 +49,16 @@ pub use model::{
     MediaControlAction, MediaState, NetworkState, Notification, NotificationAction,
     NotificationState, NotificationUrgency, OutputRole, OutputState, PlaybackStatus, PowerProfile,
     PowerState, ResourceState, SourceHealth, SourceId, StateUpdate, SystemState, SystemUpdate,
-    TimerState, WindowState, WorkspaceState,
+    TimerState, TokenUsage, WindowState, WorkspaceState,
 };
 pub use notifications::{NotificationCommand, NotificationControl, spawn_notification_server};
 pub use sources::{
     BluetoothCommand, BluetoothControlClient, CalendarMonthRequest, CalendarRecord,
     SourceSupervisor, battery_severity, parse_calendar_agenda_json, parse_calendar_json,
-    read_proc_sample, spawn_audio_source, spawn_bluetooth_source, spawn_brightness_source,
-    spawn_calendar_agenda_source, spawn_calendar_source, spawn_clock_source, spawn_media_source,
-    spawn_network_source, spawn_power_source, spawn_resource_source,
+    read_proc_sample, spawn_ai_usage_source, spawn_audio_source, spawn_bluetooth_source,
+    spawn_brightness_source, spawn_calendar_agenda_source, spawn_calendar_source,
+    spawn_clock_source, spawn_media_source, spawn_network_source, spawn_power_source,
+    spawn_resource_source,
 };
 pub use state::StateStore;
 pub use suggestions::{Suggestion, SuggestionAction, SuggestionEngine, SuggestionSource};

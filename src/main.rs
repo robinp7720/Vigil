@@ -18,6 +18,8 @@ struct Cli {
 
 #[derive(Debug, clap::Subcommand)]
 enum Command {
+    /// Print today's local Codex and Claude Code token usage as JSON.
+    AiUsage,
     Timer {
         #[command(subcommand)]
         command: TimerCommand,
@@ -44,7 +46,7 @@ enum Command {
         #[arg(
             long,
             default_value = "idle",
-            value_parser = ["idle", "escalation", "suggestion", "routine", "control-center", "reduced-motion"]
+            value_parser = ["idle", "escalation", "suggestion", "routine", "control-center", "reduced-motion", "ai-usage"]
         )]
         scenario: String,
     },
@@ -165,6 +167,13 @@ fn run_cli(cli: Cli) -> Result<()> {
         }
         Some(Command::TestControlServer { requests }) => vigil::run_test_control_server(requests),
         Some(Command::Preview { scenario }) => vigil::run_preview(&cli.config, &scenario),
+        Some(Command::AiUsage) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&vigil::sources::ai_usage::read_ai_usage()?)?
+            );
+            Ok(())
+        }
     }
 }
 

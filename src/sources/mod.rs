@@ -1,3 +1,4 @@
+pub mod ai_usage;
 pub mod audio;
 pub mod bluetooth;
 pub mod brightness;
@@ -20,6 +21,7 @@ use anyhow::Result;
 
 use crate::{ClockState, StateUpdate, SystemUpdate};
 
+pub use ai_usage::spawn_ai_usage_source;
 pub use audio::spawn_audio_source;
 pub use bluetooth::{BluetoothCommand, BluetoothControlClient, spawn_bluetooth_source};
 pub use brightness::{parse_brightnessctl_output, spawn_brightness_source};

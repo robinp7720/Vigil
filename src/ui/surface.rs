@@ -612,6 +612,14 @@ impl SurfaceRegistry {
         context: DesktopContext,
         requested_output: Option<&str>,
     ) -> bool {
+        self.open_control_center_page(context.into(), requested_output)
+    }
+
+    pub(super) fn open_control_center_page(
+        &self,
+        focus: ControlCenterFocus,
+        requested_output: Option<&str>,
+    ) -> bool {
         let Some((primary_output, SurfaceHandle::Primary(surface))) = self
             .surfaces
             .iter()
@@ -627,7 +635,7 @@ impl SurfaceRegistry {
         {
             surface.control_center.set_monitor(monitor);
         }
-        surface.control_center.show_page(context.into());
+        surface.control_center.show_page(focus);
         surface.control_center.present();
         true
     }
@@ -1994,6 +2002,7 @@ fn control_focus(module_id: SystemModuleId) -> ControlCenterFocus {
     match module_id {
         SystemModuleId::Keyboard => ControlCenterFocus::Keyboard,
         SystemModuleId::Resources => ControlCenterFocus::Resources,
+        SystemModuleId::AiUsage => ControlCenterFocus::AiUsage,
         SystemModuleId::Network => ControlCenterFocus::Network,
         SystemModuleId::Bluetooth => ControlCenterFocus::Bluetooth,
         SystemModuleId::Audio => ControlCenterFocus::Audio,
@@ -2197,6 +2206,7 @@ fn scroll_actions(module_id: SystemModuleId) -> Option<(ActionIntent, ActionInte
             },
         )),
         SystemModuleId::Resources
+        | SystemModuleId::AiUsage
         | SystemModuleId::Network
         | SystemModuleId::Notifications
         | SystemModuleId::Clock => None,

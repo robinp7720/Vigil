@@ -20,6 +20,7 @@ use crate::{
     SuggestionAction, SuggestionEngine,
 };
 
+use super::ai_usage::AiUsageView;
 use super::artwork::{
     ArtworkRequest, prefer_artwork_candidate, result_is_current, spawn_artwork_loader,
 };
@@ -29,6 +30,7 @@ pub enum ControlCenterFocus {
     Overview,
     Keyboard,
     Resources,
+    AiUsage,
     Network,
     Bluetooth,
     Audio,
@@ -38,10 +40,11 @@ pub enum ControlCenterFocus {
 }
 
 impl ControlCenterFocus {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Overview,
         Self::Keyboard,
         Self::Resources,
+        Self::AiUsage,
         Self::Network,
         Self::Bluetooth,
         Self::Audio,
@@ -55,6 +58,7 @@ impl ControlCenterFocus {
             Self::Overview => "overview",
             Self::Keyboard => "keyboard",
             Self::Resources => "resources",
+            Self::AiUsage => "ai-usage",
             Self::Network => "network",
             Self::Bluetooth => "bluetooth",
             Self::Audio => "audio",
@@ -69,6 +73,7 @@ impl ControlCenterFocus {
             Self::Overview => "Quick Settings",
             Self::Keyboard => "Keyboard",
             Self::Resources => "System Resources",
+            Self::AiUsage => "AI Usage",
             Self::Network => "Network",
             Self::Bluetooth => "Bluetooth",
             Self::Audio => "Audio",
@@ -83,6 +88,7 @@ impl ControlCenterFocus {
             Self::Overview => "System overview",
             Self::Keyboard => "Input layout",
             Self::Resources => "CPU and memory",
+            Self::AiUsage => "Codex & Claude Code",
             Self::Network => "Connectivity",
             Self::Bluetooth => "Devices and discovery",
             Self::Audio => "Volume and playback",
@@ -97,6 +103,7 @@ impl ControlCenterFocus {
             Self::Overview => "system",
             Self::Keyboard => "keyboard",
             Self::Resources => "system",
+            Self::AiUsage => "system",
             Self::Network => "network",
             Self::Bluetooth => "bluetooth",
             Self::Audio => "audio",
@@ -129,6 +136,8 @@ impl From<ControlCenterFocus> for DesktopContext {
             ControlCenterFocus::Overview => Self::Overview,
             ControlCenterFocus::Keyboard => Self::Keyboard,
             ControlCenterFocus::Resources => Self::Resources,
+            // AI usage is an internal detail page; Luma's system context is unchanged.
+            ControlCenterFocus::AiUsage => Self::Resources,
             ControlCenterFocus::Network => Self::Network,
             ControlCenterFocus::Bluetooth => Self::Bluetooth,
             ControlCenterFocus::Audio => Self::Audio,
@@ -257,6 +266,8 @@ pub struct ControlCenterSpec {
     pub keyboard: KeyboardControlSpec,
     pub cpu_percent: Option<u8>,
     pub memory_percent: Option<u8>,
+    pub ai_usage: crate::AiUsageState,
+    pub ai_usage_health: Option<SourceHealth>,
     pub battery_present: bool,
     pub battery_percent: Option<u8>,
     pub charging: bool,
@@ -430,6 +441,8 @@ pub fn build_control_center_spec(snapshot: &BarSnapshot) -> ControlCenterSpec {
         keyboard: keyboard_control_spec(&system.keyboard_layout),
         cpu_percent: system.resources.cpu_percent,
         memory_percent: system.resources.memory_percent,
+        ai_usage: system.ai_usage.clone(),
+        ai_usage_health: system.source_health.get(&SourceId::AiUsage).cloned(),
         battery_present: system.power.battery_present,
         battery_percent: system.power.battery_percent,
         charging: system.power.charging,
@@ -712,6 +725,7 @@ struct NavigationUi {
     title: gtk::Label,
     subtitle: gtk::Label,
     footer_label: gtk::Label,
+    footer: gtk::Button,
     error_slot: gtk::Box,
     error_label: gtk::Label,
     errors: Rc<RefCell<ControlCenterErrors>>,
@@ -736,6 +750,7 @@ impl NavigationUi {
         self.subtitle.set_label(page.subtitle());
         self.footer_label
             .set_label(&format!("Open {} in Luma", page.title()));
+        self.footer.set_visible(page != ControlCenterFocus::AiUsage);
         self.render_error();
         if let Some(callback) = self.page_changed.borrow().as_ref() {
             callback(page);
@@ -1315,6 +1330,8 @@ pub struct ControlCenterView {
     artwork: ArtworkController,
     keyboard_summary: gtk::Label,
     resources_summary: gtk::Label,
+    ai_usage: AiUsageView,
+    ai_usage_summary: gtk::Label,
     battery_summary_button: gtk::Button,
     battery_summary: gtk::Label,
     time_summary: gtk::Label,
@@ -1452,6 +1469,7 @@ impl ControlCenterView {
             title,
             subtitle,
             footer_label,
+            footer: footer.clone(),
             error_slot: error_slot.clone(),
             error_label,
             errors: errors.clone(),
@@ -1664,10 +1682,23 @@ impl ControlCenterView {
         let memory_gauge = metric_row("Memory");
         resources_page.append(&cpu_gauge.root);
         resources_page.append(&memory_gauge.root);
+        let (ai_usage_button, ai_usage_summary) =
+            summary_tile("applications-science-symbolic", "AI Usage");
+        connect_navigation(&ai_usage_button, ControlCenterFocus::AiUsage, &navigation);
+        resources_page.append(&ai_usage_button);
         stack.add_named(
             &resources_page,
             Some(ControlCenterFocus::Resources.as_str()),
         );
+
+        let ai_usage = AiUsageView::new();
+        ai_usage.update(&spec.ai_usage, spec.ai_usage_health.as_ref());
+        let ai_scroll = gtk::ScrolledWindow::new();
+        ai_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        ai_scroll.set_propagate_natural_height(true);
+        ai_scroll.set_max_content_height(700);
+        ai_scroll.set_child(Some(&ai_usage.root));
+        stack.add_named(&ai_scroll, Some(ControlCenterFocus::AiUsage.as_str()));
 
         let time_page = build_time_page(
             spec,
@@ -1966,6 +1997,8 @@ impl ControlCenterView {
             artwork,
             keyboard_summary,
             resources_summary,
+            ai_usage,
+            ai_usage_summary,
             battery_summary_button,
             battery_summary,
             time_summary,
@@ -2150,6 +2183,12 @@ impl ControlCenterView {
         self.artwork.show(spec.media.as_ref(), &self.media_widgets);
 
         self.keyboard_summary.set_label(&spec.keyboard.summary);
+        self.ai_usage
+            .update(&spec.ai_usage, spec.ai_usage_health.as_ref());
+        self.ai_usage_summary.set_label(&super::ai_usage::label(
+            &spec.ai_usage,
+            spec.ai_usage_health.as_ref(),
+        ));
         self.resources_summary.set_label(&format!(
             "{} / {}",
             percent_label(spec.cpu_percent),

@@ -119,6 +119,8 @@ pub struct SystemState {
     #[serde(default)]
     pub keyboard_layout: KeyboardLayoutState,
     pub resources: ResourceState,
+    #[serde(default)]
+    pub ai_usage: AiUsageState,
     pub network: NetworkState,
     pub bluetooth: BluetoothState,
     pub audio: AudioState,
@@ -140,6 +142,7 @@ pub struct SystemState {
 pub enum SystemUpdate {
     KeyboardLayout(KeyboardLayoutState),
     Resources(ResourceState),
+    AiUsage(AiUsageState),
     Network(NetworkState),
     Bluetooth(BluetoothState),
     Audio(AudioState),
@@ -216,6 +219,62 @@ pub struct KeyboardLayoutOption {
 pub struct ResourceState {
     pub cpu_percent: Option<u8>,
     pub memory_percent: Option<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub cache_write_input_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_output_tokens: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiQuota {
+    pub used_percent: u8,
+    pub window_minutes: u64,
+    pub resets_at: Option<i64>,
+    #[serde(default)]
+    pub estimate: AiQuotaEstimate,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AiQuotaEstimate {
+    #[default]
+    Collecting,
+    Stale,
+    ResetDue,
+    Exhausted,
+    NoRecentBurn {
+        sample_seconds: u64,
+    },
+    Available {
+        remaining_seconds: u64,
+        exhausts_at: i64,
+        sample_seconds: u64,
+        used_percent_delta: u8,
+        lasts_until_reset: Option<bool>,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiUsageState {
+    pub day: String,
+    pub codex: AiProviderUsage,
+    pub claude: AiProviderUsage,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiProviderUsage {
+    pub available: bool,
+    pub tokens: TokenUsage,
+    pub last_event_at: Option<i64>,
+    pub quotas: Vec<AiQuota>,
+    pub quota_observed_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -598,6 +657,7 @@ pub enum SourceId {
     Compositor,
     Power,
     Resources,
+    AiUsage,
     Network,
     Bluetooth,
     Audio,

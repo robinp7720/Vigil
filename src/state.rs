@@ -105,6 +105,14 @@ impl StateStore {
 
     fn apply_system_update(&mut self, update: SystemUpdate, observed_at: i64) -> bool {
         match update {
+            SystemUpdate::AiUsage(value) => {
+                if self.snapshot.system.ai_usage == value {
+                    false
+                } else {
+                    self.snapshot.system.ai_usage = value;
+                    true
+                }
+            }
             SystemUpdate::KeyboardLayout(value) => {
                 if self.snapshot.system.keyboard_layout == value {
                     false
@@ -517,6 +525,7 @@ fn source_for_update(update: &StateUpdate) -> SourceId {
         StateUpdate::System(update) => match update {
             SystemUpdate::KeyboardLayout(_) => SourceId::Compositor,
             SystemUpdate::Resources(_) => SourceId::Resources,
+            SystemUpdate::AiUsage(_) => SourceId::AiUsage,
             SystemUpdate::Network(_) => SourceId::Network,
             SystemUpdate::Bluetooth(_) => SourceId::Bluetooth,
             SystemUpdate::Audio(_) => SourceId::Audio,
@@ -548,6 +557,7 @@ fn freshness_seconds(freshness: &FreshnessConfig, source: SourceId) -> Option<u6
         | SourceId::Activity => None,
         SourceId::Power => Some(freshness.power_seconds),
         SourceId::Resources => Some(freshness.resources_seconds),
+        SourceId::AiUsage => Some(freshness.ai_usage_seconds),
         SourceId::Brightness => Some(freshness.brightness_seconds),
         SourceId::Calendar | SourceId::CalendarAgenda => Some(freshness.calendar_seconds),
         SourceId::Timers => Some(freshness.timers_seconds),

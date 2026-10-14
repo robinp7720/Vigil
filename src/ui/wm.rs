@@ -184,8 +184,10 @@ mod tests {
             ..BarSnapshot::default()
         };
 
-        let mut config = AppConfig::default();
-        config.primary_output = Some("DP-3".to_string());
+        let mut config = AppConfig {
+            primary_output: Some("DP-3".to_string()),
+            ..AppConfig::default()
+        };
         assert_eq!(
             select_primary_output(&snapshot, &config).as_deref(),
             Some("DP-3")
