@@ -2,6 +2,7 @@ mod ai_usage;
 mod artwork;
 pub mod context_card;
 pub mod control_center;
+mod morph;
 pub mod popovers;
 pub mod surface;
 pub mod system;
