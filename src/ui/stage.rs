@@ -10,6 +10,7 @@ use super::morph::MorphRect;
 pub const BAR_HEIGHT: i32 = 44;
 pub const SURFACE_MARGIN: i32 = 5;
 pub const NOTIFICATION_GAP: i32 = 10;
+pub const PANEL_STAGE_MARGIN_X: i32 = 28;
 pub const CONTROL_CENTER_RADIUS: f32 = 18.0;
 pub const CARD_RADIUS: f32 = 14.0;
 
@@ -53,6 +54,7 @@ pub fn stage_width_request(current_request: i32, needed: i32, visible: bool) -> 
 
 /// The width to map origins with: the allocated width when known, unless a just-grown
 /// request has not been allocated yet.
+#[cfg(test)]
 pub fn origin_stage_width(requested: i32, allocated: Option<i32>) -> i32 {
     allocated
         .filter(|width| *width > 0)
@@ -72,7 +74,17 @@ pub fn toast_input_shape(shape: MorphRect) -> Option<MorphRect> {
     ))
 }
 
+/// Maps a monitor-space rectangle directly into `panel_morph`'s local coordinates.
+/// Because the panel is top-right aligned (`halign = End`, `margin_end = 28`), its monitor
+/// position depends only on `monitor_width` and `panel_width`, never on async stage resizes.
+pub fn monitor_to_panel_local(rect: MorphRect, monitor_width: i32, panel_width: i32) -> MorphRect {
+    let panel_left = monitor_width - SURFACE_MARGIN - PANEL_STAGE_MARGIN_X - panel_width;
+    let panel_top = SURFACE_MARGIN + panel_top_in_stage();
+    rect.translated(-panel_left as f32, -panel_top as f32)
+}
+
 /// A stage anchored top-right with `SURFACE_MARGIN` margins.
+#[cfg(test)]
 pub fn monitor_to_top_right_stage(
     rect: MorphRect,
     monitor_width: i32,
@@ -206,6 +218,10 @@ mod tests {
         assert_eq!(
             monitor_to_top_right_stage(rect, 2560, 512),
             MorphRect::new(257.0, 4.0, 30.0, 28.0)
+        );
+        assert_eq!(
+            monitor_to_panel_local(rect, 2560, 480),
+            MorphRect::new(253.0, -45.0, 30.0, 28.0)
         );
     }
 

@@ -751,33 +751,49 @@ impl NavigationUi {
         self.navigate_with(page, false, Some(origin));
     }
 
+    /// Switches immediately to `page` without an inner crossfade; used when opening or
+    /// switching pages from a topbar click so the entire popup grows as one unit.
+    fn snap_to(&self, page: ControlCenterFocus) {
+        self.page.set(page);
+        self.return_origin.set(None);
+        self.stack.set_visible_child_name(page.as_str());
+        self.page_morph.cancel();
+        self.heading_morph.cancel();
+        self.title.set_label(page.title());
+        self.subtitle.set_label(page.subtitle());
+        self.back_button
+            .set_visible(page != ControlCenterFocus::Overview);
+        self.footer_label
+            .set_label(&format!("Open {} in Luma", page.title()));
+        self.footer.set_visible(page != ControlCenterFocus::AiUsage);
+        self.render_error();
+        if let Some(callback) = self.page_changed.borrow().as_ref() {
+            callback(page);
+        }
+    }
+
     fn navigate_with(&self, page: ControlCenterFocus, backwards: bool, origin: Option<MorphRect>) {
         let previous = self.page.get();
         self.page.set(page);
         let show = || self.stack.set_visible_child_name(page.as_str());
+        let _ = (backwards, origin);
         if previous == page || !self.page_morph.is_mapped() {
             self.return_origin.set(None);
-            self.page_morph.cancel();
             show();
-        } else if let Some(origin) = origin {
-            self.return_origin.set(Some(origin));
-            self.page_morph
-                .expand_from(MorphOrigin::Window(origin), true, show);
-        } else if let (true, Some(origin)) = (backwards, self.return_origin.take()) {
-            self.page_morph
-                .collapse_into(MorphOrigin::Window(origin), true, show);
+            self.page_morph.cancel();
+            self.heading_morph.cancel();
+            self.title.set_label(page.title());
+            self.subtitle.set_label(page.subtitle());
         } else {
             self.return_origin.set(None);
             self.page_morph.crossfade(show);
-        }
-        self.back_button
-            .set_visible(page != ControlCenterFocus::Overview);
-        if previous != page {
             self.heading_morph.crossfade(|| {
                 self.title.set_label(page.title());
                 self.subtitle.set_label(page.subtitle());
             });
         }
+        self.back_button
+            .set_visible(page != ControlCenterFocus::Overview);
         self.footer_label
             .set_label(&format!("Open {} in Luma", page.title()));
         self.footer.set_visible(page != ControlCenterFocus::AiUsage);
@@ -1176,7 +1192,13 @@ impl ControlCenterMotion {
 
     fn present(self: &Rc<Self>, origin: MorphOrigin) {
         let current = self.phase.get();
-        let next = current.transition(ControlCenterMotionEvent::Present);
+        let retargeting_visible =
+            current == ControlCenterMotionPhase::Visible && self.origin.get() != origin;
+        let next = if retargeting_visible {
+            ControlCenterMotionPhase::Entering
+        } else {
+            current.transition(ControlCenterMotionEvent::Present)
+        };
         if next == current {
             return;
         }
@@ -1194,6 +1216,9 @@ impl ControlCenterMotion {
             self.phase.set(ControlCenterMotionPhase::Visible);
             window.present();
             return;
+        }
+        if retargeting_visible {
+            panel.cancel();
         }
         self.phase.set(next);
         window.present();
@@ -1285,13 +1310,14 @@ impl ControlCenterMotion {
     }
 }
 
-/// Converts a monitor-space origin into the stage, falling back to a centered scale.
-fn panel_origin(origin: Option<MorphRect>, monitor_width: i32, stage_width: i32) -> MorphOrigin {
+/// Converts a monitor-space origin into `panel_morph` local coordinates, falling back to a
+/// centered scale when no button origin is available.
+fn panel_origin(origin: Option<MorphRect>, monitor_width: i32, panel_width: i32) -> MorphOrigin {
     origin.map_or(MorphOrigin::Scaled(0.92), |rect| {
-        MorphOrigin::Window(stage::monitor_to_top_right_stage(
+        MorphOrigin::Local(stage::monitor_to_panel_local(
             rect,
             monitor_width,
-            stage_width,
+            panel_width,
         ))
     })
 }
@@ -1775,6 +1801,29 @@ impl ControlCenterView {
             &notifications_page,
             Some(ControlCenterFocus::Notifications.as_str()),
         );
+        root.append(&page_morph);
+        root.append(&error_slot);
+        root.append(&footer);
+
+        let panel_morph = MorphBin::new();
+        panel_morph.set_halign(gtk::Align::End);
+        panel_morph.set_valign(gtk::Align::Start);
+        panel_morph.set_margin_top(stage::panel_top_in_stage());
+        panel_morph.set_margin_start(28);
+        panel_morph.set_margin_end(28);
+        panel_morph.set_margin_bottom(32);
+        panel_morph.set_radius(stage::CONTROL_CENTER_RADIUS);
+        panel_morph.set_shadow(Some(MorphShadow {
+            dy: 18.0,
+            blur: 48.0,
+            alpha: 0.44,
+        }));
+        panel_morph.set_child(Some(&root));
+        let stage_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        stage_box.set_size_request((monitor.geometry().width() - right_margin * 2).max(568), -1);
+        stage_box.append(&panel_morph);
+        window.set_child(Some(&stage_box));
+
         let time_page_for_navigation = time_page.clone();
         let notification_control_for_navigation = notification_control.clone();
         *navigation.page_changed.borrow_mut() = Some(Rc::new(move |page| {
@@ -1793,25 +1842,6 @@ impl ControlCenterView {
                 let _ = control.mark_read();
             }
         }));
-
-        root.append(&page_morph);
-        root.append(&error_slot);
-        root.append(&footer);
-
-        let panel_morph = MorphBin::new();
-        panel_morph.set_halign(gtk::Align::End);
-        panel_morph.set_valign(gtk::Align::Start);
-        panel_morph.set_margin_top(stage::panel_top_in_stage());
-        panel_morph.set_radius(stage::CONTROL_CENTER_RADIUS);
-        panel_morph.set_shadow(Some(MorphShadow {
-            dy: 18.0,
-            blur: 48.0,
-            alpha: 0.44,
-        }));
-        panel_morph.set_child(Some(&root));
-        let stage_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        stage_box.append(&panel_morph);
-        window.set_child(Some(&stage_box));
         {
             let panel = panel_morph.downgrade();
             stage::track_input(&window, move || {
@@ -2146,8 +2176,17 @@ impl ControlCenterView {
             .window
             .monitor()
             .map_or(0, |monitor| monitor.geometry().width());
-        let (_, panel_width, _, _) = self.panel_morph.measure(gtk::Orientation::Horizontal, -1);
-        let needed = stage::control_center_stage_width(panel_width, origin, monitor_width);
+        let (_, measured_outer_width, _, _) =
+            self.panel_morph.measure(gtk::Orientation::Horizontal, -1);
+        let allocated_panel_width = self.panel_morph.width();
+        let panel_width = if allocated_panel_width > 0 {
+            allocated_panel_width
+        } else {
+            (measured_outer_width - stage::PANEL_STAGE_MARGIN_X * 2).max(480)
+        };
+        let stage_panel_width =
+            measured_outer_width.max(panel_width + stage::PANEL_STAGE_MARGIN_X * 2);
+        let needed = stage::control_center_stage_width(stage_panel_width, origin, monitor_width);
         let visible = self.window.is_visible();
         let current_request = self.stage_box.width_request();
         let request = stage::stage_width_request(current_request, needed, visible);
@@ -2158,11 +2197,8 @@ impl ControlCenterView {
                 self.window.set_default_size(request, -1);
             }
         }
-        // The window is resizable, so a visible stage may be wider than its request.
-        let allocated = visible.then(|| self.stage_box.width());
-        let stage_width = stage::origin_stage_width(request, allocated);
         self.motion
-            .present(panel_origin(origin, monitor_width, stage_width));
+            .present(panel_origin(origin, monitor_width, panel_width));
         sync_bluetooth_discovery(
             &self.timer_sender,
             &self.current,
@@ -2207,7 +2243,7 @@ impl ControlCenterView {
     }
 
     pub fn show_page(&self, focus: ControlCenterFocus) {
-        self.navigation.navigate(focus, false);
+        self.navigation.snap_to(focus);
     }
 
     pub fn current_page(&self) -> ControlCenterFocus {
@@ -5166,10 +5202,10 @@ mod tests {
 
         let button = MorphRect::new(2300.0, 9.0, 30.0, 28.0);
         assert_eq!(
-            panel_origin(Some(button), 2560, 512),
-            MorphOrigin::Window(MorphRect::new(257.0, 4.0, 30.0, 28.0))
+            panel_origin(Some(button), 2560, 480),
+            MorphOrigin::Local(MorphRect::new(253.0, -45.0, 30.0, 28.0))
         );
-        assert_eq!(panel_origin(None, 2560, 512), MorphOrigin::Scaled(0.92));
+        assert_eq!(panel_origin(None, 2560, 480), MorphOrigin::Scaled(0.92));
     }
 
     #[test]

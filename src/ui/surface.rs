@@ -505,11 +505,12 @@ impl SurfaceRegistry {
         };
         let monitor_width = monitor.geometry().width();
         let width = notification_stack_width(monitor_width);
+        let stage_width = width + TOAST_STAGE_PAD * 2;
         let island = match self.surfaces.get(focused_output) {
             Some(SurfaceHandle::Primary(surface)) => surface.island_rect(),
             _ => None,
         };
-        let origin = stage::toast_origin(island, monitor_width, width);
+        let origin = stage::toast_origin(island, monitor_width, stage_width);
 
         // Output or width changes rebuild the stack without motion.
         let stale = self
@@ -751,7 +752,7 @@ impl SurfaceRegistry {
         }
         surface.control_center.show_page(focus);
         let origin = (target_output == primary_output)
-            .then(|| widget_monitor_rect(&surface.system_box))
+            .then(|| surface.origin_for_focus(focus))
             .flatten();
         surface.control_center.present_from(origin);
         true
@@ -834,18 +835,21 @@ fn toast_render_key(notification: &Notification) -> Notification {
     }
 }
 
+const TOAST_STAGE_PAD: i32 = 16;
+
 fn new_notification_stack(
     application: &gtk::Application,
     monitor: &gdk::Monitor,
     width: i32,
     output: &str,
 ) -> NotificationStackHandle {
+    let stage_width = width + TOAST_STAGE_PAD * 2;
     let window = gtk::ApplicationWindow::builder()
         .application(application)
         .title("Vigil Notifications")
         .build();
     window.set_decorated(false);
-    window.set_default_size(width, -1);
+    window.set_default_size(stage_width, -1);
     window.add_css_class("notification-window");
     window.init_layer_shell();
     window.set_namespace(Some("vigil-notifications"));
@@ -862,6 +866,9 @@ fn new_notification_stack(
     content.add_css_class("notification-stack");
     content.set_valign(gtk::Align::Start);
     content.set_margin_top(stage::toast_top_in_stage());
+    content.set_margin_start(TOAST_STAGE_PAD);
+    content.set_margin_end(TOAST_STAGE_PAD);
+    content.set_margin_bottom(24);
     content.set_size_request(width, -1);
     window.set_child(Some(&content));
     let rows: ToastRows = Rc::new(RefCell::new(BTreeMap::new()));
@@ -1202,6 +1209,7 @@ impl PrimarySurface {
 
         let context_morph = MorphBin::new();
         context_morph.set_follow(true, false);
+        context_morph.set_radius(12.0);
         context_morph.set_child(Some(&context_stack));
         center_slot.append(&context_morph);
 
@@ -1264,7 +1272,7 @@ impl PrimarySurface {
                     }
                     SuggestionAction::OpenControlCenter(context) => {
                         control_center.show_page(context.into());
-                        control_center.present();
+                        control_center.present_from(widget_monitor_rect(button));
                     }
                 }
             });
@@ -1539,6 +1547,25 @@ impl PrimarySurface {
             .iter()
             .map(|module| module.button.id)
             .collect();
+    }
+
+    fn origin_for_focus(&self, focus: ControlCenterFocus) -> Option<MorphRect> {
+        let module_id = match focus {
+            ControlCenterFocus::Keyboard => Some(SystemModuleId::Keyboard),
+            ControlCenterFocus::Resources => Some(SystemModuleId::Resources),
+            ControlCenterFocus::AiUsage => Some(SystemModuleId::AiUsage),
+            ControlCenterFocus::Network => Some(SystemModuleId::Network),
+            ControlCenterFocus::Bluetooth => Some(SystemModuleId::Bluetooth),
+            ControlCenterFocus::Audio => Some(SystemModuleId::Audio),
+            ControlCenterFocus::Power => Some(SystemModuleId::Power),
+            ControlCenterFocus::Notifications => Some(SystemModuleId::Notifications),
+            ControlCenterFocus::Clock => Some(SystemModuleId::Clock),
+            ControlCenterFocus::Overview => None,
+        };
+        module_id
+            .and_then(|id| self.status_buttons.get(&id))
+            .and_then(|view| widget_monitor_rect(&view.button))
+            .or_else(|| widget_monitor_rect(&self.system_box))
     }
 }
 
