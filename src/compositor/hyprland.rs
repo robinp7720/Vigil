@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicBool;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::swipe::{SwipeFeed, parse_hyprland_swipe};
 use crate::{KeyboardLayoutOption, KeyboardLayoutState, StateUpdate};
 
 use super::{
@@ -201,6 +202,13 @@ impl HyprlandAdapter {
 
             let trimmed = line.trim_end();
             if trimmed.is_empty() {
+                continue;
+            }
+
+            if let Some((event, payload)) = trimmed.split_once(">>")
+                && let Some(swipe) = parse_hyprland_swipe(event, payload)
+            {
+                SwipeFeed::global().apply(swipe);
                 continue;
             }
 

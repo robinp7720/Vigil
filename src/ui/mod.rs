@@ -10,6 +10,7 @@ pub mod surface;
 pub mod system;
 pub mod theme;
 pub mod wm;
+mod workspace_pill;
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -31,6 +32,7 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 use tracing::warn;
 
+use crate::swipe::SwipeFeed;
 use crate::{
     ActionCompletion, ActionRequest, ActionResult, ActionRouter, ActivityStatus, ActivityTracker,
     ActivityUpdate, AppConfig, CalendarMonthRequest, CommandActivity, ControlRequest,
@@ -436,6 +438,8 @@ fn install_ui_loop(
         });
     }
 
+    install_swipe_wakeup();
+
     if let Some(display) = gtk::gdk::Display::default() {
         if let Err(error) = refresh_theme_provider(
             &display,
@@ -492,6 +496,28 @@ fn install_ui_loop(
     runtime
         .registry
         .reconcile(application, &snapshot, &config, &action_tx);
+}
+
+/// Swipe samples bypass the state loop; this wakes idle workspace pills on the
+/// main thread when a swipe starts so they can follow it frame by frame.
+fn install_swipe_wakeup() {
+    let (wakeup, waker) = match UnixDatagram::pair() {
+        Ok(pair) => pair,
+        Err(error) => {
+            warn!("swipe wakeup unavailable: {error:#}");
+            return;
+        }
+    };
+    let _ = wakeup.set_nonblocking(true);
+    let _ = waker.set_nonblocking(true);
+    SwipeFeed::global().set_waker(move || {
+        let _ = waker.send(&[1]);
+    });
+    glib::source::unix_fd_add_local(wakeup.as_raw_fd(), glib::IOCondition::IN, move |_, _| {
+        while wakeup.recv(&mut [0; 64]).is_ok() {}
+        workspace_pill::wake_all();
+        glib::ControlFlow::Continue
+    });
 }
 
 fn drain_updates(runtime: &mut UiRuntime, now_epoch: i64) -> bool {
@@ -764,6 +790,8 @@ fn spawn_compositor_worker(
                             }
                             Ok(None) => return,
                             Err(error) => {
+                                // An end event may have been lost with the connection.
+                                SwipeFeed::global().clear();
                                 let _ = sender.send(StateUpdate::Health {
                                     source: SourceId::Compositor,
                                     health: SourceHealth::Disconnected {

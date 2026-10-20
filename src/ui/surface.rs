@@ -31,6 +31,7 @@ use super::popovers::PopoverCoordinator;
 use super::stage::{self, BAR_HEIGHT, SURFACE_MARGIN};
 use super::system::{SystemButtonSpec, SystemCluster, SystemModuleId, build_system_cluster};
 use super::wm::{WindowGroupSpec, select_primary_output, title_for_output, window_groups};
+use super::workspace_pill::WorkspacePill;
 
 const WORKSPACE_BUTTON_MIN_WIDTH: i32 = 32;
 const WORKSPACE_BUTTON_MIN_HEIGHT: i32 = 28;
@@ -1755,6 +1756,7 @@ fn bar_window_width_for_monitor_width(monitor_width: i32) -> i32 {
 
 struct WorkspaceStrip {
     container: gtk::Box,
+    pill: WorkspacePill,
     views: BTreeMap<String, WorkspaceButtonView>,
     order: Vec<String>,
     action_sender: Sender<ActionRequest>,
@@ -1771,8 +1773,10 @@ impl WorkspaceStrip {
         let container = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         container.add_css_class("workspace-strip");
         install_workspace_scroll(&container, action_sender.clone(), output_name.clone());
+        let pill = WorkspacePill::new(&container, output_name.clone());
         Self {
             container,
+            pill,
             views: BTreeMap::new(),
             order: Vec::new(),
             action_sender,
@@ -1780,8 +1784,8 @@ impl WorkspaceStrip {
         }
     }
 
-    fn widget(&self) -> &gtk::Box {
-        &self.container
+    fn widget(&self) -> &gtk::Overlay {
+        self.pill.widget()
     }
 
     fn render(&mut self, workspaces: &[WorkspaceButtonSpec]) {
@@ -1817,6 +1821,17 @@ impl WorkspaceStrip {
             }
             self.order = next_order;
         }
+
+        let buttons = self
+            .order
+            .iter()
+            .filter_map(|id| Some((id.clone(), self.views.get(id)?.button.clone())))
+            .collect();
+        let active = workspaces
+            .iter()
+            .find(|workspace| workspace.active)
+            .map(|workspace| workspace.id.clone());
+        self.pill.sync(buttons, active);
     }
 }
 
@@ -1850,14 +1865,10 @@ impl WorkspaceButtonView {
     }
 
     fn update(&mut self, spec: &WorkspaceButtonSpec) {
-        let activated = !self.spec.active && spec.active;
         self.button.set_label(&spec.label);
         update_state_class(&self.button, "active", spec.active);
         update_state_class(&self.button, "urgent", spec.urgent);
         self.button.set_has_frame(spec.active || spec.urgent);
-        if activated {
-            flash_class(&self.button, "workspace-activated", 520);
-        }
         self.spec = spec.clone();
     }
 }

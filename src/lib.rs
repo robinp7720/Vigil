@@ -10,6 +10,7 @@ pub mod notifications;
 pub mod sources;
 pub mod state;
 pub mod suggestions;
+pub mod swipe;
 pub mod timers;
 pub mod ui;
 
