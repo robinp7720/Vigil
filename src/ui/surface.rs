@@ -959,7 +959,7 @@ fn notification_stack_width(monitor_width: i32) -> i32 {
     monitor_width.saturating_sub(24).clamp(1, 400)
 }
 
-fn monitors_by_connector(display: &gdk::Display) -> BTreeMap<String, gdk::Monitor> {
+pub(super) fn monitors_by_connector(display: &gdk::Display) -> BTreeMap<String, gdk::Monitor> {
     display
         .monitors()
         .snapshot()

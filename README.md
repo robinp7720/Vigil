@@ -48,6 +48,21 @@ When no output is supplied, the control center opens on the currently focused
 output. A single quick-settings window is retargeted between outputs.
 `toggle` dismisses a visible panel on the same output; a specific `--context`
 switches to that page first if needed. Another output retargets the panel.
+A transient on-screen display confirms hardware keys and warns before an idle
+lock. The CLI reads the level itself, so the compositor binding runs it after
+the change:
+
+```bash
+wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.05+ && vigil osd volume
+vigil osd microphone
+vigil osd brightness
+vigil osd lock-countdown --seconds 30   # hypridle, 30s before locking
+vigil osd hide                          # hypridle on-resume
+```
+
+The display is a click-through `vigil-osd` layer near the bottom of the
+focused output; Hyprland animates its arrival.
+
 Every bar also has a desktop-search button:
 left-click opens Luma on that output, and right-click opens window search.
 When supervised by systemd, launched applications get independent user scopes

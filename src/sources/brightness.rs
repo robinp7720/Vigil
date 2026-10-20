@@ -34,7 +34,7 @@ pub fn parse_brightnessctl_output(text: &str) -> Result<BrightnessState> {
     Ok(BrightnessState::default())
 }
 
-fn read_brightness_state() -> Result<BrightnessState> {
+pub fn read_brightness_state() -> Result<BrightnessState> {
     let output = Command::new("brightnessctl")
         .args(["--class=backlight", "-m"])
         .output()

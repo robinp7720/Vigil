@@ -38,7 +38,10 @@ pub use context::{ContextCard, ContextTier, Dismissals, select_context};
 pub use integration::{
     context_snapshot, context_snapshots, intent_for_context_action, lockscreen_snapshot,
 };
-pub use ipc::{ControlClient, ControlRequest, ControlResponse, ControlSocket, control_socket_path};
+pub use ipc::{
+    ControlClient, ControlRequest, ControlResponse, ControlSocket, OsdContent, OsdKind,
+    control_socket_path,
+};
 pub use model::{
     ActionIntent, ActivityState, ActivityStatus, ActivityUpdate, AiProviderUsage, AiQuota,
     AiQuotaEstimate, AiUsageState, AudioOutputState, AudioState, BarSnapshot,
@@ -114,7 +117,9 @@ pub fn run_test_control_server(requests: usize) -> Result<()> {
             | ControlRequest::NotificationsClear
             | ControlRequest::NotificationsSetDnd { .. }
             | ControlRequest::PresentationGet
-            | ControlRequest::PresentationSet { .. } => Ok(ControlResponse::Error {
+            | ControlRequest::PresentationSet { .. }
+            | ControlRequest::OsdShow { .. }
+            | ControlRequest::OsdHide => Ok(ControlResponse::Error {
                 message: "desktop integration requires the running bar UI".to_string(),
             }),
         })?;

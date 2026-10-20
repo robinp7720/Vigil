@@ -76,6 +76,33 @@ pub enum ControlRequest {
     PresentationSet {
         hidden: bool,
     },
+    OsdShow {
+        content: OsdContent,
+        output: Option<String>,
+    },
+    OsdHide,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OsdKind {
+    Volume,
+    Microphone,
+    Brightness,
+}
+
+/// What the transient on-screen display shows. The sender resolves levels so
+/// the UI thread never waits on `wpctl` or `brightnessctl`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "content", rename_all = "snake_case")]
+pub enum OsdContent {
+    Level {
+        kind: OsdKind,
+        percent: u8,
+        muted: bool,
+    },
+    /// Counts down to an idle lock; dismissed with `OsdHide` on activity.
+    LockCountdown { seconds: u32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

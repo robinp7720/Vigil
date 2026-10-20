@@ -36,6 +36,13 @@ enum Command {
         #[command(subcommand)]
         command: ControlCenterCommand,
     },
+    /// Show a transient on-screen display on the focused output.
+    Osd {
+        #[command(subcommand)]
+        command: OsdCommand,
+        #[arg(long, global = true)]
+        output: Option<String>,
+    },
     #[command(name = "__test_control_server", hide = true)]
     TestControlServer {
         #[arg(long, default_value_t = 1)]
@@ -112,6 +119,22 @@ enum ControlCenterCommand {
     Close,
 }
 
+#[derive(Debug, clap::Subcommand)]
+enum OsdCommand {
+    /// The default output's volume and mute state.
+    Volume,
+    /// The default input's volume and mute state.
+    Microphone,
+    /// The backlight brightness.
+    Brightness,
+    /// Count down to an idle lock until `vigil osd hide`.
+    LockCountdown {
+        #[arg(long, default_value_t = 30)]
+        seconds: u32,
+    },
+    Hide,
+}
+
 fn default_config_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -165,6 +188,10 @@ fn run_cli(cli: Cli) -> Result<()> {
             let response = vigil::ControlClient::new()?.send(&request)?;
             handle_control_response(response)
         }
+        Some(Command::Osd { command, output }) => {
+            let response = vigil::ControlClient::new()?.send(&osd_request(command, output)?)?;
+            handle_control_response(response)
+        }
         Some(Command::TestControlServer { requests }) => vigil::run_test_control_server(requests),
         Some(Command::Preview { scenario }) => vigil::run_preview(&cli.config, &scenario),
         Some(Command::AiUsage) => {
@@ -175,6 +202,33 @@ fn run_cli(cli: Cli) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn osd_request(command: OsdCommand, output: Option<String>) -> Result<vigil::ControlRequest> {
+    let level = |kind, (percent, muted)| vigil::OsdContent::Level {
+        kind,
+        percent,
+        muted,
+    };
+    let content = match command {
+        OsdCommand::Volume => level(
+            vigil::OsdKind::Volume,
+            vigil::sources::read_wpctl_level("@DEFAULT_AUDIO_SINK@")?,
+        ),
+        OsdCommand::Microphone => level(
+            vigil::OsdKind::Microphone,
+            vigil::sources::read_wpctl_level("@DEFAULT_AUDIO_SOURCE@")?,
+        ),
+        OsdCommand::Brightness => {
+            let percent = vigil::sources::read_brightness_state()?
+                .percent
+                .ok_or_else(|| anyhow!("no backlight device reports a brightness"))?;
+            level(vigil::OsdKind::Brightness, (percent, false))
+        }
+        OsdCommand::LockCountdown { seconds } => vigil::OsdContent::LockCountdown { seconds },
+        OsdCommand::Hide => return Ok(vigil::ControlRequest::OsdHide),
+    };
+    Ok(vigil::ControlRequest::OsdShow { content, output })
 }
 
 fn parse_desktop_context(text: &str) -> Result<vigil::DesktopContext, String> {

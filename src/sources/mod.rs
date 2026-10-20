@@ -22,9 +22,9 @@ use anyhow::Result;
 use crate::{ClockState, StateUpdate, SystemUpdate};
 
 pub use ai_usage::spawn_ai_usage_source;
-pub use audio::spawn_audio_source;
+pub use audio::{read_wpctl_level, spawn_audio_source};
 pub use bluetooth::{BluetoothCommand, BluetoothControlClient, spawn_bluetooth_source};
-pub use brightness::{parse_brightnessctl_output, spawn_brightness_source};
+pub use brightness::{parse_brightnessctl_output, read_brightness_state, spawn_brightness_source};
 pub use calendar::{
     CalendarMonthRequest, CalendarRecord, parse_calendar_agenda_json, parse_calendar_json,
     spawn_calendar_agenda_source, spawn_calendar_source,

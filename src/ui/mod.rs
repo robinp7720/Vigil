@@ -4,6 +4,7 @@ pub mod context_card;
 pub mod control_center;
 mod morph;
 mod morph_bin;
+mod osd;
 pub mod popovers;
 mod stage;
 pub mod surface;
@@ -77,6 +78,7 @@ struct UiRuntime {
     control_wakeup: Option<UnixDatagram>,
     pending_control_actions: BTreeMap<String, Sender<ControlResponse>>,
     next_control_action_id: u64,
+    osd: osd::Osd,
 }
 
 struct UiControlRequest {
@@ -695,6 +697,7 @@ fn start_runtime(config: AppConfig, config_path: &Path) -> Result<(UiRuntime, Ru
             control_wakeup: Some(control_wakeup_rx),
             pending_control_actions: BTreeMap::new(),
             next_control_action_id: 0,
+            osd: osd::Osd::default(),
         },
         RuntimeHandles { cancelled, joins },
     ))
@@ -959,7 +962,9 @@ fn handle_control_request(
         | ControlRequest::ControlCenterClose
         | ControlRequest::LockscreenGet
         | ControlRequest::PresentationGet
-        | ControlRequest::PresentationSet { .. }) => {
+        | ControlRequest::PresentationSet { .. }
+        | ControlRequest::OsdShow { .. }
+        | ControlRequest::OsdHide) => {
             let (response_tx, response_rx) = mpsc::channel();
             control_tx
                 .send(UiControlRequest {
@@ -1065,6 +1070,23 @@ fn drain_control_requests(runtime: &mut UiRuntime) {
             }
             ControlRequest::PresentationSet { hidden } => {
                 runtime.registry.set_presentation_hidden(hidden);
+                let _ = request.response_tx.send(ControlResponse::Accepted);
+            }
+            ControlRequest::OsdShow { content, output } => {
+                let focused_output = runtime.store.snapshot().focused_output.clone();
+                let shown = runtime
+                    .osd
+                    .show(&content, output.as_deref().or(focused_output.as_deref()));
+                let _ = request.response_tx.send(if shown {
+                    ControlResponse::Accepted
+                } else {
+                    ControlResponse::Error {
+                        message: "no monitor is available for the on-screen display".to_string(),
+                    }
+                });
+            }
+            ControlRequest::OsdHide => {
+                runtime.osd.hide();
                 let _ = request.response_tx.send(ControlResponse::Accepted);
             }
             _ => {

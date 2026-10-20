@@ -93,6 +93,14 @@ fn parse_pactl_outputs(info: &str, sinks: &str) -> Result<Vec<AudioOutputState>>
         .collect())
 }
 
+/// Reads one wpctl node's volume percent and mute state, such as
+/// `@DEFAULT_AUDIO_SINK@` or `@DEFAULT_AUDIO_SOURCE@`.
+pub fn read_wpctl_level(node: &str) -> Result<(u8, bool)> {
+    let stdout = command_stdout("wpctl", ["get-volume", node])?;
+    let state = parse_wpctl_volume(&stdout)?;
+    Ok((state.volume_percent.unwrap_or_default(), state.muted))
+}
+
 fn publish_audio_snapshot(sender: &Sender<StateUpdate>, cancelled: &Arc<AtomicBool>) -> Result<()> {
     let state = read_audio_state()?;
     if sender
