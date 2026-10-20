@@ -4,8 +4,10 @@ use std::cell::{Cell, RefCell};
 
 use gtk4::{self as gtk, gdk, glib, graphene, gsk, prelude::*, subclass::prelude::*};
 
-use super::morph::{self, MorphRect, Spring, SpringParams, content_scale, fade_in, fade_out};
-use crate::MotionStyle;
+use super::morph::{
+    self, MorphRect, Spring, SpringParams, content_scales, fade_in, fade_out, genie_pinch,
+    genie_slice_span, morph_bounce_rect,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MorphOrigin {
@@ -36,6 +38,13 @@ struct Transform {
     from: Option<MorphRect>,
     capture: bool,
     progress: Spring,
+    cross_progress: Spring,
+}
+
+impl Transform {
+    fn is_settled(&self) -> bool {
+        self.progress.is_settled() && self.cross_progress.is_settled()
+    }
 }
 
 struct Ghost {
@@ -49,6 +58,14 @@ pub fn animations_enabled() -> bool {
 
 fn params() -> SpringParams {
     SpringParams::for_style(morph::motion_style())
+}
+
+fn cross_params() -> SpringParams {
+    SpringParams::cross_for_style(morph::motion_style())
+}
+
+fn layout_params() -> SpringParams {
+    SpringParams::layout_for_style(morph::motion_style())
 }
 
 /// Width the child's height is measured for. Unconstrained probes (`for_size < 0`) after the
@@ -87,6 +104,7 @@ mod imp {
         pub(super) radius: Cell<f32>,
         pub(super) shadow: Cell<Option<MorphShadow>>,
         pub(super) transform: RefCell<Option<Transform>>,
+        pub(super) transform_texture: RefCell<Option<(MorphRect, gdk::Texture)>>,
         pub(super) ghost: RefCell<Option<Ghost>>,
         pub(super) crossfade: RefCell<Option<Spring>>,
         pub(super) tick: RefCell<Option<gtk::TickCallbackId>>,
@@ -108,6 +126,7 @@ mod imp {
             }
             self.settled.take();
             self.transform.take();
+            self.transform_texture.take();
             self.ghost.take();
             self.crossfade.take();
             if let Some(child) = self.child.take() {
@@ -117,6 +136,13 @@ mod imp {
     }
 
     impl WidgetImpl for MorphBin {
+        fn unmap(&self) {
+            self.halt();
+            *self.width.borrow_mut() = None;
+            *self.height.borrow_mut() = None;
+            self.parent_unmap();
+        }
+
         fn measure(&self, orientation: gtk::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
             let Some(child) = self.child.borrow().clone() else {
                 return (0, 0, -1, -1);
@@ -167,7 +193,7 @@ mod imp {
                     None => {
                         let collapsed = self.start_collapsed.get() && animations_enabled();
                         let mut created =
-                            Spring::pixels(params(), if collapsed { 0.0 } else { target });
+                            Spring::pixels(layout_params(), if collapsed { 0.0 } else { target });
                         created.retarget(target);
                         start_ticking = collapsed;
                         *spring = Some(created);
@@ -207,7 +233,7 @@ mod imp {
             let child_height = if self.follow_height.get() {
                 let (minimum, natural, _, _) =
                     child.measure(gtk::Orientation::Vertical, child_width);
-                natural.max(height).max(minimum)
+                natural.max(minimum)
             } else {
                 height
             };
@@ -249,7 +275,7 @@ mod imp {
                     .transform
                     .borrow()
                     .as_ref()
-                    .is_some_and(|transform| !transform.progress.is_settled())
+                    .is_some_and(|transform| !transform.is_settled())
                 || self
                     .crossfade
                     .borrow()
@@ -280,7 +306,11 @@ mod imp {
                 } else {
                     imp.tick.take();
                     imp.complete();
-                    obj.queue_resize();
+                    if imp.follow_width.get() || imp.follow_height.get() {
+                        obj.queue_resize();
+                    } else {
+                        obj.queue_draw();
+                    }
                     glib::ControlFlow::Break
                 }
             });
@@ -288,24 +318,30 @@ mod imp {
         }
 
         fn advance(&self, seconds: f64) {
-            let params = params();
+            let layout = layout_params();
+            let primary = params();
+            let cross = cross_params();
             for slot in [&self.width, &self.height] {
                 if let Some(spring) = slot.borrow_mut().as_mut() {
-                    spring.set_params(params);
+                    spring.set_params(layout);
                     spring.advance(seconds);
                 }
             }
             if let Some(transform) = self.transform.borrow_mut().as_mut() {
-                transform.progress.set_params(params);
+                transform.progress.set_params(primary);
+                transform.cross_progress.set_params(cross);
                 transform.progress.advance(seconds);
+                transform.cross_progress.advance(seconds);
             }
             if let Some(spring) = self.crossfade.borrow_mut().as_mut() {
+                spring.set_params(layout);
                 spring.advance(seconds);
             }
         }
 
         pub(super) fn complete(&self) {
             self.transform.take();
+            self.transform_texture.take();
             self.ghost.take();
             self.crossfade.take();
             self.obj().queue_draw();
@@ -328,7 +364,7 @@ mod imp {
                 let transform = transform.as_ref()?;
                 (transform.origin, transform.resolved)
             };
-            let fallback = bounds.scaled_about_center(0.92);
+            let fallback = bounds.scaled_about_center(0.84);
             Some(match origin {
                 MorphOrigin::Scaled(factor) => bounds.scaled_about_center(factor),
                 MorphOrigin::Local(rect) => rect,
@@ -366,28 +402,38 @@ mod imp {
             })
         }
 
+        fn shape_for(&self, transform: &Transform, from: MorphRect, to: MorphRect) -> MorphRect {
+            morph_bounce_rect(
+                from,
+                to,
+                transform.cross_progress.value() as f32,
+                transform.progress.value() as f32,
+                transform.progress.velocity() as f32,
+                morph::motion_style(),
+            )
+        }
+
         /// The currently visible shape in local coordinates.
         pub(super) fn current_shape(&self) -> MorphRect {
             let bounds = self.bounds();
             let Some((from, to)) = self.endpoints(bounds) else {
                 return bounds;
             };
-            let progress = self
-                .transform
-                .borrow()
-                .as_ref()
-                .map_or(1.0, |transform| transform.progress.value() as f32);
-            from.lerp(to, progress)
+            let transform = self.transform.borrow();
+            let Some(transform) = transform.as_ref() else {
+                return bounds;
+            };
+            self.shape_for(transform, from, to)
         }
 
-        /// Runs `draw` clipped to the bounds while the size is animating.
+        /// Runs `draw` clipped to the bounds while the size is animating or crossfading.
         fn clipped(&self, snapshot: &gtk::Snapshot, draw: impl FnOnce(&gtk::Snapshot)) {
-            let resizing = self.is_resizing();
-            if resizing {
+            let clip = self.is_resizing() || self.crossfade.borrow().is_some();
+            if clip {
                 snapshot.push_clip(&to_graphene(self.bounds()));
             }
             draw(snapshot);
-            if resizing {
+            if clip {
                 snapshot.pop();
             }
         }
@@ -397,13 +443,19 @@ mod imp {
             if let Some(tick) = self.tick.take() {
                 tick.remove();
             }
-            for slot in [&self.width, &self.height] {
-                if let Some(spring) = slot.borrow_mut().as_mut() {
-                    let target = spring.target();
-                    spring.snap(target);
+            if self.obj().is_mapped() {
+                for slot in [&self.width, &self.height] {
+                    if let Some(spring) = slot.borrow_mut().as_mut() {
+                        let target = spring.target();
+                        spring.snap(target);
+                    }
                 }
+            } else {
+                *self.width.borrow_mut() = None;
+                *self.height.borrow_mut() = None;
             }
             self.transform.take();
+            self.transform_texture.take();
             self.ghost.take();
             self.crossfade.take();
         }
@@ -444,11 +496,12 @@ mod imp {
             let ghost = self.ghost.borrow();
             match (ghost.as_ref(), progress) {
                 (Some(ghost), Some(progress)) => {
-                    snapshot.push_opacity(fade_out(progress, 0.0, 0.4));
+                    snapshot.push_opacity(fade_out(progress, 0.0, 0.45));
                     let x = (bounds.width - ghost.rect.width) / 2.0;
                     self.snapshot_ghost(snapshot, ghost, x, ghost.rect.y);
                     snapshot.pop();
-                    snapshot.push_opacity(fade_in(progress, 0.2, 1.0));
+
+                    snapshot.push_opacity(fade_in(progress, 0.15, 0.90));
                     self.snapshot_child(snapshot);
                     snapshot.pop();
                 }
@@ -465,7 +518,9 @@ mod imp {
             to: MorphRect,
         ) {
             let progress = transform.progress.value();
+            let progress_y = progress as f32;
             let ghost = self.ghost.borrow();
+            let shape = self.shape_for(transform, from, to);
             match transform.kind {
                 TransformKind::Expand => {
                     if let Some(ghost) = ghost.as_ref() {
@@ -475,21 +530,20 @@ mod imp {
                             snapshot.pop();
                         });
                     }
-                    let origin = from;
-                    let shape = from.lerp(to, progress as f32);
                     self.snapshot_shaped(
                         snapshot,
                         shape,
                         bounds,
-                        origin,
-                        fade_in(progress, 0.0, 0.3),
+                        from,
+                        progress_y,
+                        false,
+                        fade_in(progress, 0.0, 0.12),
                         |snapshot| self.snapshot_child(snapshot),
                     );
                 }
                 TransformKind::Collapse => {
                     let origin = to;
-                    let shape = from.lerp(to, progress as f32);
-                    let opacity = fade_out(progress, 0.5, 1.0);
+                    let opacity = fade_out(progress, 0.48, 1.0);
                     if transform.capture {
                         self.clipped(snapshot, |snapshot| {
                             snapshot.push_opacity(fade_in(progress, 0.0, 0.6));
@@ -503,6 +557,8 @@ mod imp {
                                 shape,
                                 full,
                                 origin,
+                                progress_y,
+                                true,
                                 opacity,
                                 |snapshot| self.snapshot_ghost(snapshot, ghost, full.x, full.y),
                             );
@@ -513,6 +569,8 @@ mod imp {
                             shape,
                             bounds,
                             origin,
+                            progress_y,
+                            true,
                             opacity,
                             |snapshot| self.snapshot_child(snapshot),
                         );
@@ -521,25 +579,95 @@ mod imp {
             }
         }
 
-        /// Draws `content` (laid out at `full`) scaled into `shape` with a rounded clip.
+        /// Rasterizes `content` (at `full` with `end_radius` rounded corners) once per transform
+        /// into a GPU `gdk::Texture` so Genie funnel slices and squash-and-stretch bounces
+        /// deform the window and its content as a single locked texture with zero per-frame
+        /// widget-tree re-traversal.
+        fn ensure_transform_texture(
+            &self,
+            full: MorphRect,
+            end_radius: f32,
+            content: impl FnOnce(&gtk::Snapshot),
+        ) -> Option<gdk::Texture> {
+            if full.width < 1.0 || full.height < 1.0 {
+                return None;
+            }
+            if let Some((cached, texture)) = self.transform_texture.borrow().as_ref()
+                && (cached.width - full.width).abs() < 0.5
+                && (cached.height - full.height).abs() < 0.5
+            {
+                return Some(texture.clone());
+            }
+            let native = self.obj().native()?;
+            let renderer = native.renderer()?;
+            let scale = native
+                .surface()
+                .map_or(1.0, |surface| surface.scale() as f32)
+                .max(1.0);
+            let temp = gtk::Snapshot::new();
+            temp.save();
+            temp.scale(scale, scale);
+            let full_outline = gsk::RoundedRect::from_rect(to_graphene(full), end_radius);
+            temp.push_rounded_clip(&full_outline);
+            content(&temp);
+            temp.pop();
+            temp.restore();
+            let node = temp.to_node()?;
+            let viewport = graphene::Rect::new(
+                full.x * scale,
+                full.y * scale,
+                full.width * scale,
+                full.height * scale,
+            );
+            let texture = renderer.render_texture(&node, Some(&viewport));
+            *self.transform_texture.borrow_mut() = Some((full, texture.clone()));
+            Some(texture)
+        }
+
+        /// Draws `content` (laid out at `full`) into `shape` with a Genie S-curve funnel
+        /// emerging from `origin` followed by volume-conserving squash-and-stretch bounces.
+        #[allow(clippy::too_many_arguments)]
         fn snapshot_shaped(
             &self,
             snapshot: &gtk::Snapshot,
             shape: MorphRect,
             full: MorphRect,
             origin: MorphRect,
+            progress_y: f32,
+            collapsing: bool,
             opacity: f64,
-            content: impl FnOnce(&gtk::Snapshot),
+            content: impl Fn(&gtk::Snapshot),
         ) {
+            if shape.width <= 0.5
+                || shape.height <= 0.5
+                || full.width <= 0.5
+                || full.height <= 0.5
+                || opacity <= 0.001
+            {
+                return;
+            }
+            let style = morph::motion_style();
+            let pinch = genie_pinch(progress_y, collapsing, style);
             let end_radius = self.radius.get();
             let start_radius = end_radius.min(origin.height / 2.0);
             let span = (full.width - origin.width).abs().max(1.0);
             let progress = ((shape.width - origin.width).abs() / span).clamp(0.0, 1.0);
-            let radius = start_radius + (end_radius - start_radius) * progress;
-            let outline = gsk::RoundedRect::from_rect(to_graphene(shape), radius);
+            let radius = (start_radius + (end_radius - start_radius) * progress)
+                .clamp(0.0, shape.width.min(shape.height) * 0.5);
+
             if let Some(shadow) = self.shadow.get() {
+                let shadow_rect = if pinch > 0.004 {
+                    let (body_x, body_w) =
+                        genie_slice_span(origin, full, shape, 0.72, progress_y, collapsing, style);
+                    let shadow_y = shape.y + shape.height * 0.14 * pinch;
+                    let shadow_h = (shape.height - (shadow_y - shape.y)).max(1.0);
+                    MorphRect::new(body_x, shadow_y, body_w, shadow_h)
+                } else {
+                    shape
+                };
+                let shadow_outline = gsk::RoundedRect::from_rect(to_graphene(shadow_rect), radius);
                 snapshot.append_outset_shadow(
-                    &outline,
+                    &shadow_outline,
                     &gdk::RGBA::new(0.0, 0.0, 0.0, shadow.alpha * opacity as f32),
                     0.0,
                     shadow.dy,
@@ -547,20 +675,57 @@ mod imp {
                     shadow.blur,
                 );
             }
-            // The resize clip applies to the content only, never to the outset shadow.
-            self.clipped(snapshot, |snapshot| {
+
+            if let Some(texture) = self.ensure_transform_texture(full, end_radius, &content) {
                 snapshot.push_opacity(opacity);
-                snapshot.push_rounded_clip(&outline);
-                snapshot.save();
-                snapshot.translate(&graphene::Point::new(shape.x, shape.y));
-                let scale = content_scale(shape, full);
-                snapshot.scale(scale, scale);
-                snapshot.translate(&graphene::Point::new(-full.x, -full.y));
-                content(snapshot);
-                snapshot.restore();
+                if pinch > 0.004 {
+                    const GENIE_SLICES: usize = 28;
+                    for i in 0..GENIE_SLICES {
+                        let v0 = i as f32 / GENIE_SLICES as f32;
+                        let v1 = (i + 1) as f32 / GENIE_SLICES as f32;
+                        let y0 = if i == 0 {
+                            shape.y
+                        } else {
+                            (shape.y + shape.height * v0).round()
+                        };
+                        let y1 = if i + 1 == GENIE_SLICES {
+                            shape.y + shape.height
+                        } else {
+                            (shape.y + shape.height * v1).round()
+                        };
+                        if y1 <= y0 {
+                            continue;
+                        }
+                        let v_mid = (v0 + v1) * 0.5;
+                        let (slice_x, slice_w) = genie_slice_span(
+                            origin, full, shape, v_mid, progress_y, collapsing, style,
+                        );
+                        snapshot.push_clip(&graphene::Rect::new(slice_x, y0, slice_w, y1 - y0));
+                        snapshot.append_texture(
+                            &texture,
+                            &graphene::Rect::new(slice_x, shape.y, slice_w, shape.height),
+                        );
+                        snapshot.pop();
+                    }
+                } else {
+                    snapshot.append_texture(&texture, &to_graphene(shape));
+                }
                 snapshot.pop();
-                snapshot.pop();
-            });
+                return;
+            }
+
+            let (scale_x, scale_y) = content_scales(shape, full);
+            let outline = gsk::RoundedRect::from_rect(to_graphene(shape), radius);
+            snapshot.push_opacity(opacity);
+            snapshot.push_rounded_clip(&outline);
+            snapshot.save();
+            snapshot.translate(&graphene::Point::new(shape.x, shape.y));
+            snapshot.scale(scale_x, scale_y);
+            snapshot.translate(&graphene::Point::new(-full.x, -full.y));
+            content(snapshot);
+            snapshot.restore();
+            snapshot.pop();
+            snapshot.pop();
         }
     }
 }
@@ -634,11 +799,15 @@ impl MorphBin {
             return;
         };
         *imp.ghost.borrow_mut() = Some(ghost);
-        let mut spring = Spring::progress(SpringParams::for_style(MotionStyle::Calm));
-        spring.retarget(1.0);
-        *imp.crossfade.borrow_mut() = Some(spring);
+        let mut progress = Spring::progress(layout_params());
+        progress.retarget(1.0);
+        *imp.crossfade.borrow_mut() = Some(progress);
         imp.ensure_ticking();
-        self.queue_resize();
+        if imp.follow_width.get() || imp.follow_height.get() {
+            self.queue_resize();
+        } else {
+            self.queue_draw();
+        }
     }
 
     pub fn expand_from(&self, origin: MorphOrigin, capture: bool, mutate: impl FnOnce()) {
@@ -666,30 +835,35 @@ impl MorphBin {
         // Interrupting a transform continues from the shape currently on screen, with
         // the spring velocity kept (same direction) or reversed (opposite direction) so
         // momentum stays continuous.
-        let interrupted = imp
-            .transform
-            .borrow()
-            .as_ref()
-            .map(|transform| (transform.kind, transform.progress.velocity()));
-        let (from, velocity) = match interrupted {
-            Some((previous, velocity)) => {
+        let interrupted = imp.transform.borrow().as_ref().map(|transform| {
+            (
+                transform.kind,
+                transform.progress.velocity(),
+                transform.cross_progress.velocity(),
+            )
+        });
+        let (from, velocity, cross_velocity) = match interrupted {
+            Some((previous, velocity, cross_velocity)) => {
                 let shape = imp.current_shape();
                 let usable = shape.width > 0.0 && shape.height > 0.0;
-                let velocity = if previous == kind {
-                    velocity
-                } else {
-                    -velocity
-                };
-                (usable.then_some(shape), velocity)
+                let sign = if previous == kind { 1.0 } else { -1.0 };
+                (
+                    usable.then_some(shape),
+                    velocity * sign,
+                    cross_velocity * sign,
+                )
             }
-            None => (None, 0.0),
+            None => (None, 0.0, 0.0),
         };
         let ghost = if capture { imp.capture() } else { None };
         mutate();
+        imp.transform_texture.take();
         *imp.ghost.borrow_mut() = ghost;
         imp.crossfade.take();
         let mut progress = Spring::progress(params());
         progress.restart(0.0, 1.0, velocity);
+        let mut cross_progress = Spring::progress(cross_params());
+        cross_progress.restart(0.0, 1.0, cross_velocity);
         *imp.transform.borrow_mut() = Some(Transform {
             kind,
             origin,
@@ -697,9 +871,14 @@ impl MorphBin {
             from,
             capture,
             progress,
+            cross_progress,
         });
         imp.ensure_ticking();
-        self.queue_resize();
+        if imp.follow_width.get() || imp.follow_height.get() {
+            self.queue_resize();
+        } else {
+            self.queue_draw();
+        }
     }
 
     pub fn on_settled(&self, callback: impl FnOnce() + 'static) {
