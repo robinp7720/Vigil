@@ -1114,9 +1114,11 @@ struct TimePage {
     view_stack: gtk::Stack,
     calendar_tab: gtk::ToggleButton,
     calendar: gtk::Calendar,
+    agenda_title: gtk::Label,
     agenda_list: gtk::Box,
     agenda_empty: gtk::Label,
     agenda_status: gtk::Label,
+    requested_month: Rc<Cell<Option<(i32, u32)>>>,
     rendered_agenda: Rc<RefCell<Option<AgendaRenderKey>>>,
     expanded_event: Rc<RefCell<Option<String>>>,
     agenda_details: Rc<RefCell<BTreeMap<String, gtk::Box>>>,
@@ -1132,6 +1134,7 @@ struct AgendaRenderKey {
     year: i32,
     month: u32,
     day: i32,
+    loaded: bool,
     events: Vec<CalendarAgendaEvent>,
     error: Option<String>,
 }
@@ -4614,9 +4617,11 @@ fn build_time_page(
         view_stack,
         calendar_tab,
         calendar,
+        agenda_title,
         agenda_list,
         agenda_empty,
         agenda_status,
+        requested_month: Rc::new(Cell::new(None)),
         rendered_agenda: Rc::new(RefCell::new(None)),
         expanded_event: Rc::new(RefCell::new(None)),
         agenda_details: Rc::new(RefCell::new(BTreeMap::new())),
@@ -4630,43 +4635,26 @@ fn build_time_page(
     connect_time_calendar(&page);
     let page_for_today = page.clone();
     today.connect_clicked(move |_| reset_time_calendar(&page_for_today));
-    request_calendar_month(&page);
+    begin_calendar_load(&page);
     page
 }
 
 fn connect_time_calendar(page: &TimePage) {
-    let latest = page.latest_spec.clone();
-    let list = page.agenda_list.clone();
-    let empty = page.agenda_empty.clone();
-    let status = page.agenda_status.clone();
-    let rendered = page.rendered_agenda.clone();
-    let expanded = page.expanded_event.clone();
-    let details = page.agenda_details.clone();
-    let action = page.calendar_action.clone();
+    let page_for_day = page.clone();
     page.calendar.connect_day_selected(move |calendar| {
-        render_agenda(
-            calendar,
-            &list,
-            &empty,
-            &status,
-            &rendered,
-            &expanded,
-            &details,
-            &latest.borrow(),
-            &action,
-        );
+        // Clicking a greyed-out day from a neighbouring month switches month.
+        if page_for_day.requested_month.get() != Some(displayed_month(calendar)) {
+            begin_calendar_load(&page_for_day);
+        }
+        render_agenda(&page_for_day, &page_for_day.latest_spec.borrow());
     });
 
     macro_rules! connect_load {
         ($signal:ident) => {{
-            let sender = page.calendar_sender.clone();
-            let status = page.agenda_status.clone();
-            let empty = page.agenda_empty.clone();
-            let list = page.agenda_list.clone();
-            let rendered = page.rendered_agenda.clone();
-            page.calendar.$signal(move |calendar| {
-                begin_calendar_load(calendar, &sender, &status, &empty, &list, &rendered);
-            });
+            let page = page.clone();
+            page.calendar
+                .clone()
+                .$signal(move |_| begin_calendar_load(&page));
         }};
     }
     connect_load!(connect_next_month);
@@ -4675,50 +4663,19 @@ fn connect_time_calendar(page: &TimePage) {
     connect_load!(connect_prev_year);
 }
 
-fn begin_calendar_load(
-    calendar: &gtk::Calendar,
-    sender: &Option<Sender<CalendarMonthRequest>>,
-    status: &gtk::Label,
-    empty: &gtk::Label,
-    list: &gtk::Box,
-    rendered: &Rc<RefCell<Option<AgendaRenderKey>>>,
-) {
-    calendar.clear_marks();
-    status.set_label(if sender.is_some() {
-        "Loading calendar…"
-    } else {
-        "Calendar integration unavailable"
-    });
-    status.set_visible(true);
-    empty.set_visible(false);
-    clear_box(list);
-    rendered.borrow_mut().take();
-    if let Some(sender) = sender {
-        let _ = sender.send(CalendarMonthRequest {
-            year: calendar.year(),
-            month: calendar_month(calendar),
-        });
+fn begin_calendar_load(page: &TimePage) {
+    let (year, month) = displayed_month(&page.calendar);
+    page.requested_month.set(Some((year, month)));
+    set_day_event_levels(&page.calendar, &BTreeMap::new());
+    page.rendered_agenda.borrow_mut().take();
+    if let Some(sender) = &page.calendar_sender {
+        let _ = sender.send(CalendarMonthRequest { year, month });
     }
-}
-
-/// The displayed month as 1–12; `gtk::Calendar::month()` counts from zero.
-fn calendar_month(calendar: &gtk::Calendar) -> u32 {
-    calendar_month_from_gtk(calendar.month())
-}
-
-fn calendar_month_from_gtk(month: i32) -> u32 {
-    u32::try_from(month.clamp(0, 11) + 1).unwrap_or(1)
-}
-
-fn request_calendar_month(page: &TimePage) {
-    begin_calendar_load(
-        &page.calendar,
-        &page.calendar_sender,
-        &page.agenda_status,
-        &page.agenda_empty,
-        &page.agenda_list,
-        &page.rendered_agenda,
-    );
+    // Render straight away: the store may already hold this month, and a
+    // remembered month arrives without another snapshot change.
+    let spec = page.latest_spec.borrow().clone();
+    update_calendar_marks(&page.calendar, spec.calendar_agenda.as_ref());
+    render_agenda(page, &spec);
 }
 
 fn reset_time_page(page: &TimePage) {
@@ -4731,7 +4688,7 @@ fn reset_time_calendar(page: &TimePage) {
     if let Ok(today) = glib::DateTime::now_local() {
         page.calendar.set_date(&today);
     }
-    request_calendar_month(page);
+    begin_calendar_load(page);
 }
 
 fn update_time_page(page: &TimePage, spec: &ControlCenterSpec) {
@@ -4739,55 +4696,130 @@ fn update_time_page(page: &TimePage, spec: &ControlCenterSpec) {
     page.clock.set_label(&spec.clock);
     page.date.set_label(&local_date_label(spec.clock_epoch));
     update_calendar_marks(&page.calendar, spec.calendar_agenda.as_ref());
-    render_agenda(
-        &page.calendar,
-        &page.agenda_list,
-        &page.agenda_empty,
-        &page.agenda_status,
-        &page.rendered_agenda,
-        &page.expanded_event,
-        &page.agenda_details,
-        spec,
-        &page.calendar_action,
-    );
+    render_agenda(page, spec);
 }
 
 fn local_date_label(epoch: i64) -> String {
     glib::DateTime::from_unix_local(epoch)
-        .and_then(|date| date.format("%A, %e %B"))
-        .map(|label| label.trim().to_string())
+        .and_then(|date| date.format("%A, %-e %B"))
+        .map(|label| label.to_string())
         .unwrap_or_else(|_| "Local time".to_string())
 }
 
+/// The displayed year and month as 1–12; `gtk::Calendar::month()` counts from zero.
+fn displayed_month(calendar: &gtk::Calendar) -> (i32, u32) {
+    (calendar.year(), calendar_month_from_gtk(calendar.month()))
+}
+
+fn calendar_month_from_gtk(month: i32) -> u32 {
+    u32::try_from(month.clamp(0, 11) + 1).unwrap_or(1)
+}
+
 fn update_calendar_marks(calendar: &gtk::Calendar, agenda: Option<&CalendarAgenda>) {
-    calendar.clear_marks();
-    let Some(agenda) = agenda.filter(|agenda| {
-        agenda.year == calendar.year() && agenda.month == calendar_month(calendar)
-    }) else {
-        return;
-    };
-    for day in 1..=31 {
-        if !events_for_local_day(&agenda.events, agenda.year, agenda.month, day).is_empty() {
-            calendar.mark_day(u32::try_from(day).unwrap_or_default());
+    let (year, month) = displayed_month(calendar);
+    let levels = agenda
+        .filter(|agenda| agenda.year == year && agenda.month == month)
+        .map(|agenda| day_event_levels(&agenda.events, year, month))
+        .unwrap_or_default();
+    set_day_event_levels(calendar, &levels);
+}
+
+const DAY_EVENT_LEVEL_CLASSES: [&str; 3] = ["events-1", "events-2", "events-3"];
+
+/// How busy each day of the month is: 1 for all-day or a single event,
+/// 2 for two timed events, 3 for three or more.
+fn day_event_levels(events: &[CalendarAgendaEvent], year: i32, month: u32) -> BTreeMap<u32, u8> {
+    (1..=31)
+        .filter_map(|day| {
+            let events = events_for_local_day(events, year, month, day);
+            let timed = events.iter().filter(|event| !event.all_day).count();
+            let level = match timed {
+                0 if events.is_empty() => return None,
+                0 | 1 => 1,
+                2 => 2,
+                _ => 3,
+            };
+            Some((u32::try_from(day).unwrap_or_default(), level))
+        })
+        .collect()
+}
+
+/// GtkCalendar only offers a single "marked" state, so tag its day labels
+/// with a density class instead.
+fn set_day_event_levels(calendar: &gtk::Calendar, levels: &BTreeMap<u32, u8>) {
+    let mut stack = vec![calendar.clone().upcast::<gtk::Widget>()];
+    while let Some(widget) = stack.pop() {
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            child = current.next_sibling();
+            stack.push(current.clone());
+            let Ok(label) = current.downcast::<gtk::Label>() else {
+                continue;
+            };
+            if !label.has_css_class("day-number") {
+                continue;
+            }
+            for class in DAY_EVENT_LEVEL_CLASSES {
+                label.remove_css_class(class);
+            }
+            if label.has_css_class("other-month") {
+                continue;
+            }
+            let level = label
+                .label()
+                .parse::<u32>()
+                .ok()
+                .and_then(|day| levels.get(&day));
+            if let Some(&level) = level {
+                label.add_css_class(DAY_EVENT_LEVEL_CLASSES[usize::from(level.clamp(1, 3) - 1)]);
+            }
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_agenda(
-    calendar: &gtk::Calendar,
-    list: &gtk::Box,
-    empty: &gtk::Label,
-    status: &gtk::Label,
-    rendered: &Rc<RefCell<Option<AgendaRenderKey>>>,
-    expanded: &Rc<RefCell<Option<String>>>,
-    details: &Rc<RefCell<BTreeMap<String, gtk::Box>>>,
-    spec: &ControlCenterSpec,
-    action: &ActionHandle,
-) {
-    let year = calendar.year();
-    let month = calendar_month(calendar);
-    let day = calendar.day();
+fn selected_day_heading(selected: (i32, u32, i32), today: (i32, u32, i32)) -> String {
+    let local_day = |(year, month, day): (i32, u32, i32)| {
+        glib::DateTime::from_local(year, i32::try_from(month).unwrap_or(1), day, 0, 0, 0.0)
+    };
+    let (Ok(selected_date), Ok(today_date)) = (local_day(selected), local_day(today)) else {
+        return "Selected day".to_string();
+    };
+    let format = if selected.0 == today.0 {
+        "%A, %-e %B"
+    } else {
+        "%A, %-e %B %Y"
+    };
+    let label = selected_date
+        .format(format)
+        .map(|label| label.to_string())
+        .unwrap_or_else(|_| "Selected day".to_string());
+    // Round so a daylight-saving change does not shift the offset.
+    let days = (selected_date.difference(&today_date).as_seconds() as f64 / 86_400.0).round();
+    match days as i64 {
+        0 => format!("Today · {label}"),
+        1 => format!("Tomorrow · {label}"),
+        -1 => format!("Yesterday · {label}"),
+        _ => label,
+    }
+}
+
+fn render_agenda(page: &TimePage, spec: &ControlCenterSpec) {
+    let (year, month) = displayed_month(&page.calendar);
+    let day = page.calendar.day();
+    let today = glib::DateTime::from_unix_local(spec.clock_epoch)
+        .ok()
+        .filter(|_| spec.clock_epoch > 0)
+        .or_else(|| glib::DateTime::now_local().ok());
+    if let Some(today) = today {
+        let today = (
+            today.year(),
+            u32::try_from(today.month()).unwrap_or(1),
+            today.day_of_month(),
+        );
+        page.agenda_title
+            .set_label(&selected_day_heading((year, month, day), today));
+    }
+
     let matching = spec
         .calendar_agenda
         .as_ref()
@@ -4799,31 +4831,40 @@ fn render_agenda(
         year,
         month,
         day,
+        loaded: matching.is_some(),
         events: events.clone(),
         error: spec.calendar_agenda_error.clone(),
     };
-    if rendered.borrow().as_ref() == Some(&key) {
+    if page.rendered_agenda.borrow().as_ref() == Some(&key) {
         return;
     }
-    *rendered.borrow_mut() = Some(key);
-    clear_box(list);
-    details.borrow_mut().clear();
-    expanded.borrow_mut().take();
+    *page.rendered_agenda.borrow_mut() = Some(key);
+    clear_box(&page.agenda_list);
+    page.agenda_details.borrow_mut().clear();
+    page.expanded_event.borrow_mut().take();
 
     if matching.is_none() {
-        status.set_label(
-            spec.calendar_agenda_error
-                .as_deref()
-                .unwrap_or("Loading calendar…"),
-        );
-        status.set_visible(true);
-        empty.set_visible(false);
+        page.agenda_status
+            .set_label(if page.calendar_sender.is_none() {
+                "Calendar integration unavailable"
+            } else {
+                spec.calendar_agenda_error
+                    .as_deref()
+                    .unwrap_or("Loading calendar…")
+            });
+        page.agenda_status.set_visible(true);
+        page.agenda_empty.set_visible(false);
         return;
     }
-    status.set_visible(false);
-    empty.set_visible(events.is_empty());
+    page.agenda_status.set_visible(false);
+    page.agenda_empty.set_visible(events.is_empty());
     for event in events {
-        list.append(&agenda_event_row(&event, expanded, details, action));
+        page.agenda_list.append(&agenda_event_row(
+            &event,
+            &page.expanded_event,
+            &page.agenda_details,
+            &page.calendar_action,
+        ));
     }
 }
 
@@ -5380,6 +5421,69 @@ mod tests {
                 .map(|event| event.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["conference", "meeting"]
+        );
+    }
+
+    #[test]
+    fn day_event_levels_weight_timed_events_over_all_day_ones() {
+        use super::day_event_levels;
+
+        let at = |day: i32, hour: i32| {
+            glib::DateTime::from_local(2027, 1, day, hour, 0, 0.0)
+                .unwrap()
+                .to_unix()
+        };
+        let event = |id: &str, start: i64, end: i64, all_day: bool| CalendarAgendaEvent {
+            id: id.to_string(),
+            title: id.to_string(),
+            location: None,
+            calendar: None,
+            start_epoch: start,
+            end_epoch: end,
+            all_day,
+        };
+        let events = vec![
+            event("trip", at(4, 0), at(7, 0), true),
+            event("lecture", at(5, 9), at(5, 11), false),
+            event("a", at(12, 9), at(12, 10), false),
+            event("b", at(12, 13), at(12, 14), false),
+            event("c", at(20, 9), at(20, 10), false),
+            event("d", at(20, 11), at(20, 12), false),
+            event("e", at(20, 15), at(20, 16), false),
+            event("f", at(20, 18), at(20, 19), false),
+        ];
+
+        let levels = day_event_levels(&events, 2027, 1);
+        assert_eq!(
+            levels.into_iter().collect::<Vec<_>>(),
+            vec![(4, 1), (5, 1), (6, 1), (12, 2), (20, 3)]
+        );
+    }
+
+    #[test]
+    fn selected_day_heading_names_nearby_days_and_other_years() {
+        use super::selected_day_heading;
+
+        let today = (2026, 10, 21);
+        assert_eq!(
+            selected_day_heading((2026, 10, 21), today),
+            "Today · Wednesday, 21 October"
+        );
+        assert_eq!(
+            selected_day_heading((2026, 10, 22), today),
+            "Tomorrow · Thursday, 22 October"
+        );
+        assert_eq!(
+            selected_day_heading((2026, 10, 20), today),
+            "Yesterday · Tuesday, 20 October"
+        );
+        assert_eq!(
+            selected_day_heading((2026, 11, 1), today),
+            "Sunday, 1 November"
+        );
+        assert_eq!(
+            selected_day_heading((2027, 1, 4), today),
+            "Monday, 4 January 2027"
         );
     }
 
