@@ -833,6 +833,7 @@ mod tests {
                 charging: false,
                 profile: PowerProfile::Balanced,
                 changed_at: 0,
+                ..PowerState::default()
             })),
             1_800_000_020,
         ));

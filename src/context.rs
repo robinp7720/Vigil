@@ -1140,6 +1140,7 @@ mod tests {
                 charging,
                 profile: PowerProfile::Balanced,
                 changed_at: 1_799_999_950,
+                ..PowerState::default()
             };
             self
         }

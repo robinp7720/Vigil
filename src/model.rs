@@ -534,8 +534,37 @@ pub struct PowerState {
     pub battery_percent: Option<u8>,
     pub charging: bool,
     pub profile: PowerProfile,
+    /// Profiles the daemon offers; empty when it could not be asked.
+    #[serde(default)]
+    pub available_profiles: Vec<PowerProfile>,
+    /// Why power-profiles-daemon is holding performance back, if it is.
+    #[serde(default)]
+    pub performance_degraded: Option<String>,
+    #[serde(default)]
+    pub stats: PowerStats,
     #[serde(default)]
     pub changed_at: i64,
+}
+
+/// Live readings shown on the Power page. Every field is optional because
+/// desktops, laptops and sandboxes expose different subsets of them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PowerStats {
+    /// Battery charge or discharge rate in milliwatts.
+    pub energy_rate_mw: Option<u32>,
+    pub time_to_empty_seconds: Option<u64>,
+    pub time_to_full_seconds: Option<u64>,
+    pub energy_now_mwh: Option<u32>,
+    pub energy_full_mwh: Option<u32>,
+    pub energy_full_design_mwh: Option<u32>,
+    pub cycle_count: Option<u32>,
+    pub charge_limit_percent: Option<u8>,
+    /// CPU package temperature in whole degrees Celsius.
+    pub cpu_temp_celsius: Option<i16>,
+    pub cpu_freq_mhz: Option<u32>,
+    pub cpu_max_freq_mhz: Option<u32>,
+    /// The CPU energy/performance preference the active profile selected.
+    pub cpu_energy_preference: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

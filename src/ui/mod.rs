@@ -191,6 +191,12 @@ pub fn run_preview(config_path: &Path, scenario: &str) -> Result<()> {
         if scenario == "control-center" {
             surfaces.open_control_center(crate::DesktopContext::Overview, Some(&primary));
         }
+        if scenario == "power" {
+            surfaces.open_control_center_page(
+                control_center::ControlCenterFocus::Power,
+                Some(&primary),
+            );
+        }
         if scenario == "ai-usage" {
             surfaces.open_control_center_page(
                 control_center::ControlCenterFocus::AiUsage,
@@ -319,6 +325,26 @@ fn preview_snapshot(connectors: &[String], scenario: &str, now_epoch: i64) -> cr
                 battery_percent: Some(78),
                 charging: false,
                 profile: crate::PowerProfile::Balanced,
+                available_profiles: vec![
+                    crate::PowerProfile::PowerSaver,
+                    crate::PowerProfile::Balanced,
+                    crate::PowerProfile::Performance,
+                ],
+                performance_degraded: None,
+                stats: crate::PowerStats {
+                    energy_rate_mw: Some(8_400),
+                    time_to_empty_seconds: Some(5 * 3_600 + 12 * 60),
+                    time_to_full_seconds: None,
+                    energy_now_mwh: Some(44_460),
+                    energy_full_mwh: Some(57_000),
+                    energy_full_design_mwh: Some(62_000),
+                    cycle_count: Some(143),
+                    charge_limit_percent: Some(80),
+                    cpu_temp_celsius: Some(47),
+                    cpu_freq_mhz: Some(1_840),
+                    cpu_max_freq_mhz: Some(4_950),
+                    cpu_energy_preference: Some("balance_performance".to_string()),
+                },
                 changed_at: now_epoch,
             },
             clock: crate::ClockState {

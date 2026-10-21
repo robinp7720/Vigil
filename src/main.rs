@@ -53,7 +53,7 @@ enum Command {
         #[arg(
             long,
             default_value = "idle",
-            value_parser = ["idle", "escalation", "suggestion", "routine", "control-center", "reduced-motion", "ai-usage"]
+            value_parser = ["idle", "escalation", "suggestion", "routine", "control-center", "reduced-motion", "ai-usage", "power"]
         )]
         scenario: String,
     },

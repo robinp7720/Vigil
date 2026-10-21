@@ -52,8 +52,8 @@ pub use model::{
     DesktopContext, Direction, KeyboardLayoutOption, KeyboardLayoutState, LockscreenSnapshot,
     MediaControlAction, MediaState, NetworkState, Notification, NotificationAction,
     NotificationState, NotificationUrgency, OutputRole, OutputState, PlaybackStatus, PowerProfile,
-    PowerState, ResourceState, SourceHealth, SourceId, StateUpdate, SystemState, SystemUpdate,
-    TimerState, TokenUsage, WindowState, WorkspaceState,
+    PowerState, PowerStats, ResourceState, SourceHealth, SourceId, StateUpdate, SystemState,
+    SystemUpdate, TimerState, TokenUsage, WindowState, WorkspaceState,
 };
 pub use notifications::{NotificationCommand, NotificationControl, spawn_notification_server};
 pub use sources::{

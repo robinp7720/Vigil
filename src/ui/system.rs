@@ -1088,6 +1088,7 @@ mod tests {
             charging: true,
             profile: PowerProfile::Balanced,
             changed_at: 0,
+            ..PowerState::default()
         };
 
         let cluster = build_system_cluster(&snapshot, &AppConfig::default());

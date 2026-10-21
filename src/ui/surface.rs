@@ -2856,6 +2856,7 @@ mod tests {
             charging: false,
             profile: PowerProfile::Balanced,
             changed_at: 0,
+            ..PowerState::default()
         };
 
         let specs = surface_specs(&snapshot, &AppConfig::default(), &Dismissals::default());
@@ -2891,6 +2892,7 @@ mod tests {
             charging: false,
             profile: PowerProfile::Balanced,
             changed_at: 0,
+            ..PowerState::default()
         };
 
         let specs = surface_specs(&snapshot, &AppConfig::default(), &Dismissals::default());
@@ -2930,6 +2932,7 @@ mod tests {
             charging: false,
             profile: PowerProfile::Balanced,
             changed_at: 7,
+            ..PowerState::default()
         };
         let config = AppConfig::default();
         let mut engine = SuggestionEngine::default();

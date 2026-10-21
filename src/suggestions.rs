@@ -1004,6 +1004,7 @@ mod tests {
             charging: false,
             profile: PowerProfile::Balanced,
             changed_at: 7,
+            ..PowerState::default()
         };
         snapshot.system.audio = AudioState {
             muted: true,

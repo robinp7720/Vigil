@@ -211,6 +211,34 @@ pub struct BluetoothManagerSpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PowerProfileOptionSpec {
+    pub profile: PowerProfile,
+    pub available: bool,
+    pub selected: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PowerStatSpec {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub value: String,
+    pub caption: Option<String>,
+    pub level: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PowerPageSpec {
+    pub hero_icon: &'static str,
+    pub hero_eyebrow: &'static str,
+    pub hero_title: String,
+    pub hero_detail: String,
+    pub profiles: Vec<PowerProfileOptionSpec>,
+    pub profile_note: String,
+    pub performance_degraded: bool,
+    pub stats: Vec<PowerStatSpec>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyboardLayoutControlSpec {
     pub index: u8,
     pub title: String,
@@ -265,6 +293,7 @@ pub struct ControlCenterSpec {
     pub bluetooth_manager: BluetoothManagerSpec,
     pub audio: AudioControlSpec,
     pub power: QuickControlSpec,
+    pub power_page: PowerPageSpec,
     pub brightness: Option<BrightnessControlSpec>,
     pub keyboard: KeyboardControlSpec,
     pub cpu_percent: Option<u8>,
@@ -432,6 +461,7 @@ pub fn build_control_center_spec(snapshot: &BarSnapshot) -> ControlCenterSpec {
             available: true,
             toggle_available: false,
         },
+        power_page: power_page_spec(&system.power),
         brightness: system
             .brightness
             .device
@@ -718,6 +748,247 @@ fn power_profile_icon(profile: &PowerProfile) -> &'static str {
         PowerProfile::Balanced => "power-profile-balanced-symbolic",
         PowerProfile::PowerSaver => "power-profile-power-saver-symbolic",
     }
+}
+
+const POWER_PROFILE_ORDER: [PowerProfile; 3] = [
+    PowerProfile::PowerSaver,
+    PowerProfile::Balanced,
+    PowerProfile::Performance,
+];
+
+fn power_profile_description(profile: &PowerProfile) -> &'static str {
+    match profile {
+        PowerProfile::Performance => "Holds clocks high for sustained heavy work",
+        PowerProfile::Balanced => "Full speed on demand, frugal when idle",
+        PowerProfile::PowerSaver => "Cooler and quieter, trades speed for efficiency",
+    }
+}
+
+fn performance_degraded_label(reason: &str) -> String {
+    match reason {
+        "lap-detected" => "Performance limited · device is on a lap".to_string(),
+        "high-operating-temperature" => "Performance limited · running hot".to_string(),
+        other => format!("Performance limited · {}", other.replace('-', " ")),
+    }
+}
+
+fn power_page_spec(power: &crate::PowerState) -> PowerPageSpec {
+    let stats = &power.stats;
+    let (hero_icon, hero_eyebrow, hero_title, hero_detail) = if power.battery_present {
+        (
+            battery_level_icon(power.battery_percent, power.charging),
+            "Battery",
+            power
+                .battery_percent
+                .map(|percent| format!("{percent}%"))
+                .unwrap_or_else(|| "Reading battery".to_string()),
+            battery_hero_detail(power),
+        )
+    } else {
+        (
+            power_profile_icon(&power.profile),
+            "Power profile",
+            power_profile_label(&power.profile).to_string(),
+            "Running on mains power".to_string(),
+        )
+    };
+
+    let profiles = POWER_PROFILE_ORDER
+        .iter()
+        .map(|profile| PowerProfileOptionSpec {
+            profile: profile.clone(),
+            // An empty list means the daemon could not be asked; offer all.
+            available: power.available_profiles.is_empty()
+                || power.available_profiles.contains(profile),
+            selected: power.profile == *profile,
+        })
+        .collect();
+    let (profile_note, performance_degraded) = match power.performance_degraded.as_deref() {
+        Some(reason) => (performance_degraded_label(reason), true),
+        None => (power_profile_description(&power.profile).to_string(), false),
+    };
+
+    let mut stat_specs = Vec::new();
+    if power.battery_present {
+        if let Some(rate) = stats.energy_rate_mw {
+            stat_specs.push(PowerStatSpec {
+                id: "rate",
+                label: if power.charging {
+                    "Charging at"
+                } else {
+                    "Draw"
+                },
+                value: format_watts(rate),
+                caption: stats
+                    .energy_now_mwh
+                    .map(|now| format!("{} stored", format_watt_hours(now))),
+                level: None,
+            });
+        }
+        if let Some((full, design)) = stats
+            .energy_full_mwh
+            .zip(stats.energy_full_design_mwh)
+            .filter(|(_, design)| *design > 0)
+        {
+            let health = (u64::from(full) * 100 + u64::from(design) / 2) / u64::from(design);
+            stat_specs.push(PowerStatSpec {
+                id: "health",
+                label: "Health",
+                value: format!("{}%", health.min(100)),
+                caption: Some(format!(
+                    "{} of {}",
+                    format_watt_hours(full).trim_end_matches(" Wh"),
+                    format_watt_hours(design)
+                )),
+                level: (health < 60).then_some("warning"),
+            });
+        }
+        if let Some(cycles) = stats.cycle_count {
+            stat_specs.push(PowerStatSpec {
+                id: "cycles",
+                label: "Cycles",
+                value: cycles.to_string(),
+                caption: Some("full charges".to_string()),
+                level: None,
+            });
+        }
+    }
+    if let Some(temp) = stats.cpu_temp_celsius {
+        stat_specs.push(PowerStatSpec {
+            id: "cpu-temp",
+            label: "CPU temp",
+            value: format!("{temp} °C"),
+            caption: Some("package".to_string()),
+            level: if temp >= 90 {
+                Some("critical")
+            } else if temp >= 80 {
+                Some("warning")
+            } else {
+                None
+            },
+        });
+    }
+    if let Some(freq) = stats.cpu_freq_mhz {
+        stat_specs.push(PowerStatSpec {
+            id: "cpu-clock",
+            label: "CPU clock",
+            value: format_gigahertz(freq),
+            caption: stats
+                .cpu_max_freq_mhz
+                .map(|max| format!("of {} max", format_gigahertz(max))),
+            level: None,
+        });
+    }
+    if let Some(preference) = stats.cpu_energy_preference.as_deref() {
+        let (value, caption) = match preference {
+            "performance" => ("Speed", "energy preference"),
+            "balance_performance" => ("Balanced", "leans to speed"),
+            "balance_power" => ("Balanced", "leans to efficiency"),
+            "power" => ("Efficiency", "energy preference"),
+            "default" => ("Default", "energy preference"),
+            other => (other, "energy preference"),
+        };
+        stat_specs.push(PowerStatSpec {
+            id: "cpu-bias",
+            label: "CPU bias",
+            value: value.to_string(),
+            caption: Some(caption.to_string()),
+            level: None,
+        });
+    }
+
+    PowerPageSpec {
+        hero_icon,
+        hero_eyebrow,
+        hero_title,
+        hero_detail,
+        profiles,
+        profile_note,
+        performance_degraded,
+        stats: stat_specs,
+    }
+}
+
+fn battery_hero_detail(power: &crate::PowerState) -> String {
+    let stats = &power.stats;
+    let held = stats
+        .charge_limit_percent
+        .zip(power.battery_percent)
+        .filter(|(limit, percent)| percent >= limit);
+    if power.charging {
+        if let Some((limit, _)) = held {
+            format!("Plugged in · held at {limit}%")
+        } else if let Some(seconds) = stats.time_to_full_seconds {
+            format!("Charging · {} to full", format_duration(seconds))
+        } else if power.battery_percent == Some(100) {
+            "Fully charged".to_string()
+        } else {
+            "Charging".to_string()
+        }
+    } else if let Some(seconds) = stats.time_to_empty_seconds {
+        format!("On battery · {} left", format_duration(seconds))
+    } else {
+        "On battery".to_string()
+    }
+}
+
+fn battery_level_icon(percent: Option<u8>, charging: bool) -> &'static str {
+    const DISCHARGING: [&str; 11] = [
+        "battery-level-0-symbolic",
+        "battery-level-10-symbolic",
+        "battery-level-20-symbolic",
+        "battery-level-30-symbolic",
+        "battery-level-40-symbolic",
+        "battery-level-50-symbolic",
+        "battery-level-60-symbolic",
+        "battery-level-70-symbolic",
+        "battery-level-80-symbolic",
+        "battery-level-90-symbolic",
+        "battery-level-100-symbolic",
+    ];
+    const CHARGING: [&str; 11] = [
+        "battery-level-0-charging-symbolic",
+        "battery-level-10-charging-symbolic",
+        "battery-level-20-charging-symbolic",
+        "battery-level-30-charging-symbolic",
+        "battery-level-40-charging-symbolic",
+        "battery-level-50-charging-symbolic",
+        "battery-level-60-charging-symbolic",
+        "battery-level-70-charging-symbolic",
+        "battery-level-80-charging-symbolic",
+        "battery-level-90-charging-symbolic",
+        "battery-level-100-charged-symbolic",
+    ];
+    let Some(percent) = percent else {
+        return "battery-missing-symbolic";
+    };
+    let step = usize::from((percent.min(100) + 5) / 10);
+    if charging {
+        CHARGING[step]
+    } else {
+        DISCHARGING[step]
+    }
+}
+
+fn format_duration(seconds: u64) -> String {
+    let minutes = (seconds + 30) / 60;
+    if minutes < 60 {
+        format!("{minutes} min")
+    } else {
+        format!("{} h {:02} min", minutes / 60, minutes % 60)
+    }
+}
+
+fn format_watts(milliwatts: u32) -> String {
+    format!("{:.1} W", f64::from(milliwatts) / 1_000.0)
+}
+
+fn format_watt_hours(milliwatt_hours: u32) -> String {
+    format!("{:.1} Wh", f64::from(milliwatt_hours) / 1_000.0)
+}
+
+fn format_gigahertz(megahertz: u32) -> String {
+    format!("{:.2} GHz", f64::from(megahertz) / 1_000.0)
 }
 
 #[derive(Clone)]
@@ -1396,10 +1667,7 @@ pub struct ControlCenterView {
     bluetooth_page: BluetoothPage,
     audio_state: gtk::Label,
     audio_detail: gtk::Label,
-    battery_hero: gtk::Box,
-    battery_state: gtk::Label,
-    battery_detail: gtk::Label,
-    power_profile: gtk::Label,
+    power_page: PowerPage,
     keyboard_state: gtk::Label,
     keyboard_detail: gtk::Label,
     keyboard_layout_list: gtk::Box,
@@ -1702,30 +1970,10 @@ impl ControlCenterView {
         audio_page.append(&detail_media.root);
         stack.add_named(&audio_page, Some(ControlCenterFocus::Audio.as_str()));
 
-        let power_page = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        power_page.add_css_class("control-page");
-        let (battery_hero, battery_state, battery_detail) =
-            detail_hero("battery-good-symbolic", "Battery");
-        power_page.append(&battery_hero);
-        let profile_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-        profile_row.add_css_class("detail-action-row");
-        let profile_text = gtk::Box::new(gtk::Orientation::Vertical, 3);
-        profile_text.set_hexpand(true);
-        let profile_title = gtk::Label::new(Some("Power profile"));
-        profile_title.set_xalign(0.0);
-        let power_profile = gtk::Label::new(None);
-        power_profile.add_css_class("supporting-text");
-        power_profile.set_xalign(0.0);
-        profile_text.append(&profile_title);
-        profile_text.append(&power_profile);
-        let profile_button = icon_button("view-refresh-symbolic", "Cycle power profile");
-        profile_button.add_css_class("detail-row-action");
-        profile_row.append(&profile_text);
-        profile_row.append(&profile_button);
-        power_page.append(&profile_row);
+        let power_page = power_page();
         let detail_brightness = slider_row("display-brightness-symbolic", "Brightness");
-        power_page.append(&detail_brightness.row);
-        stack.add_named(&power_page, Some(ControlCenterFocus::Power.as_str()));
+        power_page.root.append(&detail_brightness.row);
+        stack.add_named(&power_page.root, Some(ControlCenterFocus::Power.as_str()));
 
         let keyboard_page = gtk::Box::new(gtk::Orientation::Vertical, 12);
         keyboard_page.add_css_class("control-page");
@@ -1991,15 +2239,29 @@ impl ControlCenterView {
             navigation: navigation.clone(),
             focus: ControlCenterFocus::Power,
         };
-        for button in [&power_tile.action, &profile_button] {
+        {
             let handle = power_action.clone();
-            button.connect_clicked(move |_| {
+            power_tile.action.connect_clicked(move |_| {
                 handle.send(
                     "cycle-profile",
                     ActionIntent::CyclePowerProfile {
                         direction: Direction::Next,
                     },
                 );
+            });
+        }
+        for (profile, button) in &power_page.profile_buttons {
+            let handle = power_action.clone();
+            let profile = profile.clone();
+            button.connect_clicked(move |button| {
+                if !button.has_css_class("selected") {
+                    handle.send(
+                        "set-profile",
+                        ActionIntent::SetPowerProfile {
+                            profile: profile.clone(),
+                        },
+                    );
+                }
             });
         }
 
@@ -2133,10 +2395,7 @@ impl ControlCenterView {
             bluetooth_page,
             audio_state,
             audio_detail,
-            battery_hero,
-            battery_state,
-            battery_detail,
-            power_profile,
+            power_page,
             keyboard_state,
             keyboard_detail,
             keyboard_layout_list,
@@ -2407,21 +2666,7 @@ impl ControlCenterView {
             self.navigation.clone(),
         );
 
-        self.battery_hero.set_visible(spec.battery_present);
-        if spec.battery_present {
-            self.battery_state.set_label(
-                &spec
-                    .battery_percent
-                    .map(|percent| format!("{percent}%"))
-                    .unwrap_or_else(|| "Reading battery".to_string()),
-            );
-            self.battery_detail.set_label(if spec.charging {
-                "Charging"
-            } else {
-                "On battery"
-            });
-        }
-        self.power_profile.set_label(&spec.power.detail);
+        update_power_page(&self.power_page, &spec.power_page);
         self.keyboard_state.set_label(&spec.keyboard.current);
         self.keyboard_detail.set_label(&spec.keyboard.detail);
         reconcile_keyboard_layouts(
@@ -3337,6 +3582,214 @@ fn bluetooth_page() -> BluetoothPage {
         list,
         previous: RefCell::new(None),
     }
+}
+
+struct PowerPage {
+    root: gtk::Box,
+    hero_icon: gtk::Image,
+    hero_eyebrow: gtk::Label,
+    hero_title: gtk::Label,
+    hero_detail: gtk::Label,
+    profile_buttons: Vec<(PowerProfile, gtk::Button)>,
+    profile_note: gtk::Label,
+    stats_eyebrow: gtk::Label,
+    stats: gtk::FlowBox,
+    stat_tiles: RefCell<Vec<(&'static str, PowerStatTile)>>,
+}
+
+struct PowerStatTile {
+    root: gtk::Box,
+    label: gtk::Label,
+    value: gtk::Label,
+    caption: gtk::Label,
+}
+
+fn power_page() -> PowerPage {
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    root.add_css_class("control-page");
+    root.add_css_class("power-page");
+
+    let hero = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    hero.add_css_class("detail-hero");
+    let hero_icon = gtk::Image::from_icon_name("battery-good-symbolic");
+    hero_icon.add_css_class("detail-hero-icon");
+    hero.append(&hero_icon);
+    let text = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    text.set_hexpand(true);
+    let hero_eyebrow = gtk::Label::new(None);
+    hero_eyebrow.add_css_class("detail-eyebrow");
+    hero_eyebrow.set_xalign(0.0);
+    let hero_title = gtk::Label::new(None);
+    hero_title.add_css_class("detail-hero-title");
+    hero_title.set_xalign(0.0);
+    let hero_detail = gtk::Label::new(None);
+    hero_detail.add_css_class("supporting-text");
+    hero_detail.set_xalign(0.0);
+    hero_detail.set_max_width_chars(40);
+    hero_detail.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    text.append(&hero_eyebrow);
+    text.append(&hero_title);
+    text.append(&hero_detail);
+    hero.append(&text);
+    root.append(&hero);
+
+    root.append(&section_eyebrow("PROFILE"));
+    let switcher = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    switcher.add_css_class("power-profile-switcher");
+    switcher.set_homogeneous(true);
+    let profile_buttons = POWER_PROFILE_ORDER
+        .iter()
+        .map(|profile| {
+            let button = gtk::Button::new();
+            button.add_css_class("power-profile-option");
+            button.set_has_frame(false);
+            button.set_hexpand(true);
+            let content = gtk::Box::new(gtk::Orientation::Vertical, 5);
+            content.set_halign(gtk::Align::Center);
+            let icon = gtk::Image::from_icon_name(power_profile_icon(profile));
+            icon.add_css_class("power-profile-icon");
+            let label = gtk::Label::new(Some(power_profile_label(profile)));
+            label.add_css_class("power-profile-label");
+            content.append(&icon);
+            content.append(&label);
+            button.set_child(Some(&content));
+            switcher.append(&button);
+            (profile.clone(), button)
+        })
+        .collect();
+    root.append(&switcher);
+    let profile_note = gtk::Label::new(None);
+    profile_note.add_css_class("supporting-text");
+    profile_note.add_css_class("power-profile-note");
+    profile_note.set_xalign(0.0);
+    profile_note.set_wrap(true);
+    root.append(&profile_note);
+
+    let stats_eyebrow = section_eyebrow("RIGHT NOW");
+    root.append(&stats_eyebrow);
+    let stats = gtk::FlowBox::new();
+    stats.add_css_class("power-stats");
+    stats.set_selection_mode(gtk::SelectionMode::None);
+    stats.set_homogeneous(true);
+    stats.set_min_children_per_line(3);
+    stats.set_max_children_per_line(3);
+    stats.set_column_spacing(6);
+    stats.set_row_spacing(6);
+    stats.set_can_focus(false);
+    root.append(&stats);
+
+    PowerPage {
+        root,
+        hero_icon,
+        hero_eyebrow,
+        hero_title,
+        hero_detail,
+        profile_buttons,
+        profile_note,
+        stats_eyebrow,
+        stats,
+        stat_tiles: RefCell::new(Vec::new()),
+    }
+}
+
+fn power_stat_tile() -> PowerStatTile {
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    root.add_css_class("summary-tile");
+    root.add_css_class("power-stat");
+    let label = gtk::Label::new(None);
+    label.add_css_class("summary-label");
+    label.set_xalign(0.0);
+    let value = gtk::Label::new(None);
+    value.add_css_class("summary-value");
+    value.add_css_class("power-stat-value");
+    value.set_xalign(0.0);
+    value.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    let caption = gtk::Label::new(None);
+    caption.add_css_class("power-stat-caption");
+    caption.set_xalign(0.0);
+    caption.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    root.append(&label);
+    root.append(&value);
+    root.append(&caption);
+    PowerStatTile {
+        root,
+        label,
+        value,
+        caption,
+    }
+}
+
+fn update_power_page(page: &PowerPage, spec: &PowerPageSpec) {
+    page.hero_icon.set_icon_name(Some(spec.hero_icon));
+    page.hero_eyebrow.set_label(spec.hero_eyebrow);
+    page.hero_title.set_label(&spec.hero_title);
+    page.hero_detail.set_label(&spec.hero_detail);
+
+    for (profile, button) in &page.profile_buttons {
+        let Some(option) = spec
+            .profiles
+            .iter()
+            .find(|option| option.profile == *profile)
+        else {
+            continue;
+        };
+        button.set_sensitive(option.available);
+        button.set_tooltip_text(Some(if !option.available {
+            "Not supported on this device"
+        } else if option.selected {
+            "Active profile"
+        } else {
+            power_profile_description(profile)
+        }));
+        if option.selected {
+            button.add_css_class("selected");
+        } else {
+            button.remove_css_class("selected");
+        }
+    }
+    page.profile_note.set_label(&spec.profile_note);
+    if spec.performance_degraded {
+        page.profile_note.add_css_class("warning");
+    } else {
+        page.profile_note.remove_css_class("warning");
+    }
+
+    // Rebuild the tiles only when the set of readings changes; otherwise the
+    // five-second refresh just rewrites their labels.
+    let mut tiles = page.stat_tiles.borrow_mut();
+    let ids_match = tiles.len() == spec.stats.len()
+        && tiles
+            .iter()
+            .zip(&spec.stats)
+            .all(|((id, _), stat)| *id == stat.id);
+    if !ids_match {
+        page.stats.remove_all();
+        tiles.clear();
+        for stat in &spec.stats {
+            let tile = power_stat_tile();
+            page.stats.insert(&tile.root, -1);
+            if let Some(child) = tile.root.parent() {
+                child.set_can_focus(false);
+            }
+            tiles.push((stat.id, tile));
+        }
+    }
+    for ((_, tile), stat) in tiles.iter().zip(&spec.stats) {
+        tile.label.set_label(stat.label);
+        tile.value.set_label(&stat.value);
+        tile.caption
+            .set_label(stat.caption.as_deref().unwrap_or_default());
+        tile.caption.set_visible(stat.caption.is_some());
+        for level in ["warning", "critical"] {
+            if stat.level == Some(level) {
+                tile.root.add_css_class(level);
+            } else {
+                tile.root.remove_css_class(level);
+            }
+        }
+    }
+    page.stats_eyebrow.set_visible(!spec.stats.is_empty());
+    page.stats.set_visible(!spec.stats.is_empty());
 }
 
 fn detail_hero(icon_name: &str, title: &str) -> (gtk::Box, gtk::Label, gtk::Label) {
@@ -5238,10 +5691,112 @@ mod tests {
         ControlCenterErrors, ControlCenterFocus, ControlCenterMotionEvent,
         ControlCenterMotionPhase, MetricLevel, NotificationImagePresentation, SliderDebounce,
         TimerActionState, TimerControlSpec, build_control_center_spec, control_center_origin,
-        events_for_local_day, focus_from_origin, format_network_rate, live_percent_label,
-        metric_visual, notification_age_label, notification_image_presentation,
-        quick_grid_placements, timer_action_state, volume_icon_name,
+        events_for_local_day, focus_from_origin, format_duration, format_network_rate,
+        live_percent_label, metric_visual, notification_age_label, notification_image_presentation,
+        power_page_spec, quick_grid_placements, timer_action_state, volume_icon_name,
     };
+
+    #[test]
+    fn desktop_power_page_shows_profile_hero_and_cpu_readings() {
+        let power = PowerState {
+            profile: PowerProfile::Balanced,
+            available_profiles: vec![PowerProfile::PowerSaver, PowerProfile::Balanced],
+            stats: crate::PowerStats {
+                cpu_temp_celsius: Some(84),
+                cpu_freq_mhz: Some(3_390),
+                cpu_max_freq_mhz: Some(4_950),
+                cpu_energy_preference: Some("balance_power".to_string()),
+                ..crate::PowerStats::default()
+            },
+            ..PowerState::default()
+        };
+
+        let spec = power_page_spec(&power);
+
+        assert_eq!(spec.hero_eyebrow, "Power profile");
+        assert_eq!(spec.hero_title, "Balanced");
+        let availability = spec
+            .profiles
+            .iter()
+            .map(|option| (option.available, option.selected))
+            .collect::<Vec<_>>();
+        assert_eq!(availability, [(true, false), (true, true), (false, false)]);
+        let stats = spec
+            .stats
+            .iter()
+            .map(|stat| (stat.id, stat.value.as_str(), stat.level))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stats,
+            [
+                ("cpu-temp", "84 °C", Some("warning")),
+                ("cpu-clock", "3.39 GHz", None),
+                ("cpu-bias", "Balanced", None),
+            ]
+        );
+        assert_eq!(
+            spec.stats[2].caption.as_deref(),
+            Some("leans to efficiency")
+        );
+    }
+
+    #[test]
+    fn laptop_power_page_reports_battery_time_health_and_degradation() {
+        let mut power = PowerState {
+            battery_present: true,
+            battery_percent: Some(64),
+            profile: PowerProfile::Performance,
+            performance_degraded: Some("lap-detected".to_string()),
+            stats: crate::PowerStats {
+                energy_rate_mw: Some(12_300),
+                time_to_empty_seconds: Some(2 * 3_600 + 5 * 60),
+                energy_now_mwh: Some(36_000),
+                energy_full_mwh: Some(50_000),
+                energy_full_design_mwh: Some(60_000),
+                cycle_count: Some(311),
+                charge_limit_percent: Some(80),
+                ..crate::PowerStats::default()
+            },
+            ..PowerState::default()
+        };
+
+        let spec = power_page_spec(&power);
+        assert_eq!(spec.hero_title, "64%");
+        assert_eq!(spec.hero_detail, "On battery · 2 h 05 min left");
+        assert!(spec.performance_degraded);
+        assert_eq!(
+            spec.profile_note,
+            "Performance limited · device is on a lap"
+        );
+        assert!(spec.profiles.iter().all(|option| option.available));
+        let rate = &spec.stats[0];
+        assert_eq!((rate.label, rate.value.as_str()), ("Draw", "12.3 W"));
+        assert_eq!(rate.caption.as_deref(), Some("36.0 Wh stored"));
+        let health = &spec.stats[1];
+        assert_eq!(health.value, "83%");
+        assert_eq!(health.caption.as_deref(), Some("50.0 of 60.0 Wh"));
+        assert_eq!(spec.stats[2].value, "311");
+
+        power.charging = true;
+        power.battery_percent = Some(80);
+        assert_eq!(
+            power_page_spec(&power).hero_detail,
+            "Plugged in · held at 80%"
+        );
+        power.battery_percent = Some(50);
+        power.stats.time_to_full_seconds = Some(40 * 60);
+        let charging = power_page_spec(&power);
+        assert_eq!(charging.hero_detail, "Charging · 40 min to full");
+        assert_eq!(charging.stats[0].label, "Charging at");
+    }
+
+    #[test]
+    fn durations_switch_to_hours_after_an_hour() {
+        assert_eq!(format_duration(59), "1 min");
+        assert_eq!(format_duration(59 * 60), "59 min");
+        assert_eq!(format_duration(3_600), "1 h 00 min");
+        assert_eq!(format_duration(26 * 3_600 + 7 * 60), "26 h 07 min");
+    }
 
     #[test]
     fn gtk_calendar_months_are_zero_based() {
@@ -5537,6 +6092,7 @@ mod tests {
             charging: true,
             profile: PowerProfile::Balanced,
             changed_at: 0,
+            ..PowerState::default()
         };
         snapshot.system.keyboard_layout = KeyboardLayoutState {
             current_index: Some(0),
