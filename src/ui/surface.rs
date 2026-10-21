@@ -2218,6 +2218,7 @@ struct StatusButtonView {
     icon: gtk::Image,
     label: gtk::Label,
     classes: Vec<String>,
+    secondary_action: Rc<RefCell<Option<ActionIntent>>>,
 }
 
 impl StatusButtonView {
@@ -2235,6 +2236,7 @@ impl StatusButtonView {
             self.button.add_css_class(class_name);
         }
         self.classes = spec.classes.clone();
+        self.secondary_action.replace(spec.secondary_action.clone());
         self.icon.set_icon_name(Some(&spec.icon_name));
         if let Some(text) = spec.label.as_deref() {
             self.label.set_label(text);
@@ -2337,11 +2339,31 @@ fn build_status_button(
         );
     }
 
+    let secondary_action = Rc::new(RefCell::new(None::<ActionIntent>));
+    if button_spec.id != SystemModuleId::Notifications {
+        let right_click = gtk::GestureClick::new();
+        right_click.set_button(3);
+        let action = secondary_action.clone();
+        let sender = action_sender.clone();
+        let origin = format!("secondary:{}", button_spec.id.as_str());
+        right_click.connect_released(move |gesture, _, _, _| {
+            if let Some(intent) = action.borrow().clone() {
+                let _ = sender.send(ActionRequest {
+                    origin: origin.clone(),
+                    intent,
+                });
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+            }
+        });
+        button.add_controller(right_click);
+    }
+
     let mut view = StatusButtonView {
         button,
         icon,
         label,
         classes: Vec::new(),
+        secondary_action,
     };
     view.update(button_spec);
     view

@@ -1,6 +1,6 @@
 use crate::{
-    AppConfig, AudioState, BarSnapshot, ConnectivityState, ModuleName, PlaybackStatus,
-    PowerProfile, SourceHealth, SourceId,
+    ActionIntent, AppConfig, AudioState, BarSnapshot, ConnectivityState, ModuleName,
+    PlaybackStatus, PowerProfile, SourceHealth, SourceId,
 };
 
 use super::control_center::{ControlCenterSpec, build_control_center_spec, keyboard_bar_labels};
@@ -60,6 +60,8 @@ pub struct SystemButtonSpec {
     pub label: Option<String>,
     pub tooltip: String,
     pub classes: Vec<String>,
+    /// What a secondary click does, when the module offers a quick toggle.
+    pub secondary_action: Option<ActionIntent>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -123,8 +125,8 @@ fn build_button_spec(
         SystemModuleId::Resources => resources_button(snapshot),
         SystemModuleId::AiUsage => ai_usage_button(snapshot),
         SystemModuleId::Network => network_button(snapshot),
-        SystemModuleId::Bluetooth => bluetooth_button(snapshot),
-        SystemModuleId::Audio => audio_button(snapshot),
+        SystemModuleId::Bluetooth => bluetooth_button(snapshot, config),
+        SystemModuleId::Audio => audio_button(snapshot, config),
         SystemModuleId::Power => power_button(snapshot, config),
         SystemModuleId::Notifications => notification_button(snapshot),
         SystemModuleId::Clock => clock_button(snapshot),
@@ -148,6 +150,7 @@ fn keyboard_button(snapshot: &BarSnapshot) -> SystemButtonSpec {
             snapshot.system.source_health.get(&SourceId::Compositor),
         ),
         classes,
+        secondary_action: None,
     }
 }
 
@@ -165,6 +168,7 @@ pub(super) fn ai_usage_button(snapshot: &BarSnapshot) -> SystemButtonSpec {
         label: Some(super::ai_usage::label(usage, health)),
         tooltip: with_health_note(super::ai_usage::detail(usage, health), health),
         classes,
+        secondary_action: None,
     }
 }
 
@@ -200,6 +204,7 @@ fn resources_button(snapshot: &BarSnapshot) -> SystemButtonSpec {
             snapshot.system.source_health.get(&SourceId::Resources),
         ),
         classes,
+        secondary_action: None,
     }
 }
 
@@ -219,24 +224,94 @@ fn network_button(snapshot: &BarSnapshot) -> SystemButtonSpec {
         label: None,
         tooltip: with_health_note(network_tooltip(snapshot), health),
         classes,
+        secondary_action: None,
     }
 }
 
-fn bluetooth_button(snapshot: &BarSnapshot) -> SystemButtonSpec {
+fn bluetooth_button(snapshot: &BarSnapshot, config: &AppConfig) -> SystemButtonSpec {
     let bluetooth = &snapshot.system.bluetooth;
     let health = snapshot.system.source_health.get(&SourceId::Bluetooth);
     let mut classes = base_classes(SystemModuleId::Bluetooth);
-    if !bluetooth.available || !bluetooth.powered {
+    let connected = bluetooth
+        .devices
+        .iter()
+        .filter(|device| device.connected)
+        .collect::<Vec<_>>();
+    let mut icon_name = bluetooth_icon(bluetooth).to_string();
+
+    let label = if !bluetooth.available || !bluetooth.powered {
         classes.push("inactive".to_string());
+        None
+    } else if bluetooth.pairing_prompt.is_some() {
+        classes.push("needs-attention".to_string());
+        Some("Pair".to_string())
+    } else if let Some(operation) = bluetooth.devices.iter().find_map(|device| device.operation) {
+        classes.push("busy".to_string());
+        Some(bluetooth_operation_label(operation).to_string())
+    } else {
+        match connected.as_slice() {
+            [] => None,
+            [device] => {
+                classes.push("connected".to_string());
+                if !device.icon_name.is_empty() && device.icon_name != "bluetooth-symbolic" {
+                    icon_name = device.icon_name.clone();
+                }
+                Some(bluetooth_device_label(device))
+            }
+            devices => {
+                classes.push("connected".to_string());
+                Some(devices.len().to_string())
+            }
+        }
+    };
+    if connected.iter().any(|device| {
+        device
+            .battery_percent
+            .is_some_and(|percent| percent <= config.thresholds.battery_low_percent)
+    }) {
+        classes.push("warning".to_string());
     }
     apply_health(&mut classes, health);
 
     SystemButtonSpec {
         id: SystemModuleId::Bluetooth,
-        icon_name: bluetooth_icon(bluetooth).to_string(),
-        label: None,
+        icon_name,
+        label,
         tooltip: with_health_note(bluetooth_tooltip(bluetooth), health),
         classes,
+        secondary_action: bluetooth
+            .available
+            .then_some(ActionIntent::SetBluetoothPowered {
+                powered: !bluetooth.powered,
+            }),
+    }
+}
+
+const BLUETOOTH_LABEL_CHARS: usize = 18;
+
+fn bluetooth_device_label(device: &crate::BluetoothDeviceState) -> String {
+    let name = if device.name.chars().count() > BLUETOOTH_LABEL_CHARS {
+        let kept = device
+            .name
+            .chars()
+            .take(BLUETOOTH_LABEL_CHARS - 1)
+            .collect::<String>();
+        format!("{}…", kept.trim_end())
+    } else {
+        device.name.clone()
+    };
+    match device.battery_percent {
+        Some(percent) => format!("{name} · {percent}%"),
+        None => name,
+    }
+}
+
+fn bluetooth_operation_label(operation: crate::BluetoothDeviceOperation) -> &'static str {
+    match operation {
+        crate::BluetoothDeviceOperation::Connecting => "Connecting…",
+        crate::BluetoothDeviceOperation::Disconnecting => "Disconnecting…",
+        crate::BluetoothDeviceOperation::Pairing => "Pairing…",
+        crate::BluetoothDeviceOperation::Forgetting => "Forgetting…",
     }
 }
 
@@ -255,30 +330,40 @@ fn bluetooth_tooltip(bluetooth: &crate::BluetoothState) -> String {
         return "Bluetooth unavailable".to_string();
     }
     if !bluetooth.powered {
-        return "Bluetooth off".to_string();
+        return "Bluetooth off\nRight-click to turn on".to_string();
+    }
+    let mut lines = Vec::new();
+    if let Some(prompt) = bluetooth.pairing_prompt.as_ref() {
+        lines.push(format!("Pairing request from {}", prompt.device_name));
     }
     let connected = bluetooth
         .devices
         .iter()
         .filter(|device| device.connected)
-        .count();
-    match connected {
-        0 => "Bluetooth on".to_string(),
-        1 => bluetooth
-            .connected_device
-            .as_ref()
-            .map(|device| format!("Bluetooth: {device}"))
-            .unwrap_or_else(|| "1 device connected".to_string()),
-        n => format!("{n} devices connected"),
+        .collect::<Vec<_>>();
+    if connected.is_empty() {
+        lines.push("Bluetooth on · No devices connected".to_string());
     }
+    for device in connected {
+        lines.push(match device.battery_percent {
+            Some(percent) => format!("{} · {percent}% battery", device.name),
+            None => device.name.clone(),
+        });
+    }
+    lines.push("Right-click to turn off".to_string());
+    lines.join("\n")
 }
 
-fn audio_button(snapshot: &BarSnapshot) -> SystemButtonSpec {
+/// Without its own bar item, Bluetooth state rides on the audio button.
+fn audio_button(snapshot: &BarSnapshot, config: &AppConfig) -> SystemButtonSpec {
     let mut classes = base_classes(SystemModuleId::Audio);
-    if snapshot.system.bluetooth.available && !snapshot.system.bluetooth.powered {
+    let carries_bluetooth = snapshot.system.bluetooth.available
+        && !config.modules.full.contains(&ModuleName::Bluetooth);
+    let bluetooth_off = carries_bluetooth && !snapshot.system.bluetooth.powered;
+    if bluetooth_off {
         classes.push("inactive".to_string());
     }
-    let health = if snapshot.system.bluetooth.available {
+    let health = if carries_bluetooth {
         module_health(snapshot, &[SourceId::Audio, SourceId::Bluetooth])
     } else {
         snapshot.system.source_health.get(&SourceId::Audio)
@@ -287,11 +372,11 @@ fn audio_button(snapshot: &BarSnapshot) -> SystemButtonSpec {
 
     SystemButtonSpec {
         id: SystemModuleId::Audio,
-        icon_name: audio_icon(&snapshot.system.audio, snapshot.system.bluetooth.powered)
-            .to_string(),
+        icon_name: audio_icon(&snapshot.system.audio, bluetooth_off).to_string(),
         label: None,
-        tooltip: with_health_note(audio_tooltip(snapshot), health),
+        tooltip: with_health_note(audio_tooltip(snapshot, carries_bluetooth), health),
         classes,
+        secondary_action: None,
     }
 }
 
@@ -322,6 +407,7 @@ fn power_button(snapshot: &BarSnapshot, config: &AppConfig) -> SystemButtonSpec 
         label,
         tooltip: with_health_note(power_tooltip(snapshot), health),
         classes,
+        secondary_action: None,
     }
 }
 
@@ -339,6 +425,7 @@ fn clock_button(snapshot: &BarSnapshot) -> SystemButtonSpec {
         label: Some(snapshot.system.clock.label.clone()),
         tooltip: with_health_note(format!("Clock: {}", snapshot.system.clock.label), health),
         classes,
+        secondary_action: None,
     }
 }
 
@@ -367,6 +454,7 @@ fn notification_button(snapshot: &BarSnapshot) -> SystemButtonSpec {
             format!("Notifications · {} unread", state.unread_count)
         },
         classes,
+        secondary_action: None,
     }
 }
 
@@ -381,8 +469,8 @@ fn resource_severity(cpu: Option<u8>, memory: Option<u8>) -> Option<&'static str
     }
 }
 
-fn audio_icon(audio: &AudioState, bluetooth_powered: bool) -> &'static str {
-    if !bluetooth_powered {
+fn audio_icon(audio: &AudioState, bluetooth_off: bool) -> &'static str {
+    if bluetooth_off {
         "bluetooth-disabled-symbolic"
     } else if audio.muted {
         "audio-volume-muted-symbolic"
@@ -422,7 +510,7 @@ fn network_tooltip(snapshot: &BarSnapshot) -> String {
     }
 }
 
-fn audio_tooltip(snapshot: &BarSnapshot) -> String {
+fn audio_tooltip(snapshot: &BarSnapshot, carries_bluetooth: bool) -> String {
     let mut parts = vec![format!(
         "Volume {}",
         percent_or_unavailable(snapshot.system.audio.volume_percent)
@@ -432,18 +520,18 @@ fn audio_tooltip(snapshot: &BarSnapshot) -> String {
         parts.push("Muted".to_string());
     }
 
-    if snapshot.system.bluetooth.powered {
-        parts.push(
+    if carries_bluetooth {
+        parts.push(if snapshot.system.bluetooth.powered {
             snapshot
                 .system
                 .bluetooth
                 .connected_device
                 .as_ref()
                 .map(|device| format!("Bluetooth: {device}"))
-                .unwrap_or_else(|| "Bluetooth on".to_string()),
-        );
-    } else if snapshot.system.bluetooth.available {
-        parts.push("Bluetooth off".to_string());
+                .unwrap_or_else(|| "Bluetooth on".to_string())
+        } else {
+            "Bluetooth off".to_string()
+        });
     }
 
     if let Some(media) = snapshot.system.media.as_ref() {
@@ -554,9 +642,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::{
-        AppConfig, AudioState, BarSnapshot, BluetoothDeviceState, BluetoothState, ClockState,
-        ConnectivityState, KeyboardLayoutOption, KeyboardLayoutState, ModuleName, NetworkState,
-        PowerProfile, PowerState, ResourceState, SourceHealth, SourceId,
+        ActionIntent, AppConfig, AudioState, BarSnapshot, BluetoothDeviceOperation,
+        BluetoothDeviceState, BluetoothPairingPrompt, BluetoothPairingPromptKind, BluetoothState,
+        ClockState, ConnectivityState, KeyboardLayoutOption, KeyboardLayoutState, ModuleName,
+        NetworkState, PowerProfile, PowerState, ResourceState, SourceHealth, SourceId,
     };
 
     use super::{SystemModuleId, build_system_cluster};
@@ -754,14 +843,41 @@ mod tests {
             muted: false,
             outputs: Vec::new(),
         };
+        let mut config = AppConfig::default();
+        config.modules.full = vec![ModuleName::BluetoothAudio];
 
-        let cluster = build_system_cluster(&snapshot, &AppConfig::default());
+        let cluster = build_system_cluster(&snapshot, &config);
         let audio = cluster.module(SystemModuleId::Audio);
 
         assert!(audio.classes.iter().any(|class| class == "inactive"));
         assert!(!audio.classes.iter().any(|class| class == "disconnected"));
+        assert_eq!(audio.icon_name, "bluetooth-disabled-symbolic");
         assert!(audio.tooltip.contains("Bluetooth off"));
         assert!(audio.tooltip.contains("42%"));
+    }
+
+    #[test]
+    fn audio_button_leaves_bluetooth_to_its_own_item_when_both_are_shown() {
+        let mut snapshot = snapshot();
+        snapshot.system.bluetooth = BluetoothState {
+            available: true,
+            powered: false,
+            ..BluetoothState::default()
+        };
+        snapshot.system.audio = AudioState {
+            volume_percent: Some(42),
+            muted: false,
+            outputs: Vec::new(),
+        };
+        let mut config = AppConfig::default();
+        config.modules.full = vec![ModuleName::Bluetooth, ModuleName::BluetoothAudio];
+
+        let cluster = build_system_cluster(&snapshot, &config);
+        let audio = cluster.module(SystemModuleId::Audio);
+
+        assert!(!audio.classes.iter().any(|class| class == "inactive"));
+        assert_eq!(audio.icon_name, "audio-volume-medium-symbolic");
+        assert!(!audio.tooltip.contains("Bluetooth"));
     }
 
     #[test]
@@ -805,6 +921,8 @@ mod tests {
             powered: true,
             connected_device: Some("Sony Headphones".to_string()),
             devices: vec![BluetoothDeviceState {
+                name: "Sony Headphones".to_string(),
+                icon_name: "bluetooth-symbolic".to_string(),
                 connected: true,
                 ..BluetoothDeviceState::default()
             }],
@@ -815,7 +933,123 @@ mod tests {
         let bluetooth = cluster.module(SystemModuleId::Bluetooth);
 
         assert_eq!(bluetooth.icon_name, "bluetooth-active-symbolic");
+        assert_eq!(bluetooth.label.as_deref(), Some("Sony Headphones"));
+        assert!(bluetooth.classes.iter().any(|class| class == "connected"));
         assert!(bluetooth.tooltip.contains("Sony Headphones"));
+    }
+
+    #[test]
+    fn bluetooth_status_button_names_one_device_with_its_icon_and_battery() {
+        let mut snapshot = snapshot();
+        snapshot.system.bluetooth = BluetoothState {
+            available: true,
+            powered: true,
+            devices: vec![BluetoothDeviceState {
+                name: "WH-1000XM5 Wireless Headphones".to_string(),
+                icon_name: "audio-headphones-symbolic".to_string(),
+                connected: true,
+                battery_percent: Some(12),
+                ..BluetoothDeviceState::default()
+            }],
+            ..BluetoothState::default()
+        };
+
+        let cluster = build_system_cluster(&snapshot, &AppConfig::default());
+        let bluetooth = cluster.module(SystemModuleId::Bluetooth);
+
+        assert_eq!(bluetooth.icon_name, "audio-headphones-symbolic");
+        assert_eq!(bluetooth.label.as_deref(), Some("WH-1000XM5 Wirele… · 12%"));
+        assert!(bluetooth.classes.iter().any(|class| class == "warning"));
+        assert!(
+            bluetooth
+                .tooltip
+                .contains("WH-1000XM5 Wireless Headphones · 12% battery")
+        );
+    }
+
+    #[test]
+    fn bluetooth_status_button_counts_several_connected_devices() {
+        let mut snapshot = snapshot();
+        let device = BluetoothDeviceState {
+            connected: true,
+            ..BluetoothDeviceState::default()
+        };
+        snapshot.system.bluetooth = BluetoothState {
+            available: true,
+            powered: true,
+            devices: vec![device.clone(), device],
+            ..BluetoothState::default()
+        };
+
+        let cluster = build_system_cluster(&snapshot, &AppConfig::default());
+        let bluetooth = cluster.module(SystemModuleId::Bluetooth);
+
+        assert_eq!(bluetooth.icon_name, "bluetooth-active-symbolic");
+        assert_eq!(bluetooth.label.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn bluetooth_status_button_flags_pairing_requests_and_busy_devices() {
+        let mut snapshot = snapshot();
+        snapshot.system.bluetooth = BluetoothState {
+            available: true,
+            powered: true,
+            devices: vec![BluetoothDeviceState {
+                operation: Some(BluetoothDeviceOperation::Pairing),
+                ..BluetoothDeviceState::default()
+            }],
+            ..BluetoothState::default()
+        };
+        let cluster = build_system_cluster(&snapshot, &AppConfig::default());
+        let busy = cluster.module(SystemModuleId::Bluetooth);
+        assert_eq!(busy.label.as_deref(), Some("Pairing…"));
+        assert!(busy.classes.iter().any(|class| class == "busy"));
+
+        snapshot.system.bluetooth.pairing_prompt = Some(BluetoothPairingPrompt {
+            id: 1,
+            address: "AA:BB:CC:DD:EE:FF".to_string(),
+            device_name: "Keyboard".to_string(),
+            kind: BluetoothPairingPromptKind::ConfirmPasskey { passkey: 123_456 },
+        });
+        let cluster = build_system_cluster(&snapshot, &AppConfig::default());
+        let prompt = cluster.module(SystemModuleId::Bluetooth);
+        assert_eq!(prompt.label.as_deref(), Some("Pair"));
+        assert!(
+            prompt
+                .classes
+                .iter()
+                .any(|class| class == "needs-attention")
+        );
+        assert!(prompt.tooltip.contains("Pairing request from Keyboard"));
+    }
+
+    #[test]
+    fn bluetooth_status_button_secondary_click_toggles_power() {
+        let mut snapshot = snapshot();
+        snapshot.system.bluetooth = BluetoothState {
+            available: true,
+            powered: true,
+            ..BluetoothState::default()
+        };
+        let cluster = build_system_cluster(&snapshot, &AppConfig::default());
+        assert_eq!(
+            cluster.module(SystemModuleId::Bluetooth).secondary_action,
+            Some(ActionIntent::SetBluetoothPowered { powered: false })
+        );
+
+        snapshot.system.bluetooth.powered = false;
+        let cluster = build_system_cluster(&snapshot, &AppConfig::default());
+        assert_eq!(
+            cluster.module(SystemModuleId::Bluetooth).secondary_action,
+            Some(ActionIntent::SetBluetoothPowered { powered: true })
+        );
+
+        snapshot.system.bluetooth.available = false;
+        let cluster = build_system_cluster(&snapshot, &AppConfig::default());
+        assert_eq!(
+            cluster.module(SystemModuleId::Bluetooth).secondary_action,
+            None
+        );
     }
 
     #[test]

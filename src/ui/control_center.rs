@@ -536,10 +536,10 @@ fn bluetooth_device_detail(device: &BluetoothDeviceState) -> String {
         None if device.connected => "Connected".to_string(),
         None if device.paired => "Saved".to_string(),
         None => match device.rssi {
-            Some(rssi) if rssi >= -55 => "Nearby · Strong signal".to_string(),
-            Some(rssi) if rssi >= -72 => "Nearby · Good signal".to_string(),
-            Some(_) => "Nearby · Weak signal".to_string(),
-            None => "Nearby".to_string(),
+            Some(rssi) if rssi >= -55 => "Select to pair · Strong signal".to_string(),
+            Some(rssi) if rssi >= -72 => "Select to pair · Good signal".to_string(),
+            Some(_) => "Select to pair · Weak signal".to_string(),
+            None => "Select to pair".to_string(),
         },
     };
     match device.battery_percent {
@@ -3323,7 +3323,7 @@ fn bluetooth_page() -> BluetoothPage {
     scroll.add_css_class("bluetooth-device-scroll");
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     scroll.set_min_content_height(120);
-    scroll.set_max_content_height(420);
+    scroll.set_max_content_height(700);
     scroll.set_propagate_natural_height(true);
     scroll.set_child(Some(&list));
     page.append(&scroll);
@@ -3958,7 +3958,7 @@ fn update_bluetooth_page(
         }
         page.list.append(&heading);
         let empty = gtk::Label::new(Some(if spec.discovering {
-            "Looking for devices…"
+            "Put a device in pairing mode to find it here"
         } else {
             "No nearby devices found"
         }));
