@@ -25,7 +25,6 @@ use crate::{
 use super::forward_blocking_iterator;
 
 const BLUEZ_DESTINATION: &str = "org.bluez";
-const BLUEZ_PATH_NAMESPACE: &str = "/org/bluez";
 const BLUEZ_OBJECT_MANAGER_PATH: &str = "/";
 const BLUEZ_AGENT_MANAGER_PATH: &str = "/org/bluez";
 const BLUEZ_AGENT_INTERFACE: &str = "org.bluez.AgentManager1";
@@ -71,6 +70,9 @@ struct DeviceRecord {
     path: String,
     address: String,
     name: String,
+    /// Whether the device advertised a name; BlueZ otherwise aliases it to
+    /// its address, which is only noise in a scan list.
+    named: bool,
     icon_name: String,
     paired: bool,
     trusted: bool,
@@ -93,16 +95,20 @@ struct ParsedBluetoothState {
 enum InternalEvent {
     PromptOpened(BluetoothPairingPrompt),
     PromptClosed(u64),
+    PromptsCleared,
     OperationFinished {
         address: String,
         result: Result<(), String>,
     },
 }
 
+/// `None` means the prompt expired or was superseded without an answer.
+type PromptAnswer = Option<BluetoothPairingResponse>;
+
 struct PendingPairing {
     id: u64,
     address: String,
-    response: Sender<BluetoothPairingResponse>,
+    response: async_channel::Sender<PromptAnswer>,
 }
 
 struct PairingBroker {
@@ -138,19 +144,44 @@ impl PairingBroker {
         self.active_pairs.lock().unwrap().contains(address)
     }
 
-    fn ask(
-        &self,
+    /// Waits for the user without blocking the thread: agent methods run on
+    /// zbus's single executor, which also delivers every reply on this
+    /// connection, so a blocking wait would stall the controller that
+    /// publishes the prompt.
+    async fn ask(
+        self: &Arc<Self>,
         address: String,
         kind: BluetoothPairingPromptKind,
     ) -> Result<BluetoothPairingResponse, AgentError> {
+        let (id, receiver) = self.open_prompt(address, kind);
+        let answer = receiver.recv().await.ok().flatten();
+        self.pending
+            .lock()
+            .unwrap()
+            .take_if(|pending| pending.id == id);
+        let _ = self.events.send(InternalEvent::PromptClosed(id));
+        match answer {
+            Some(BluetoothPairingResponse::Reject) => {
+                Err(AgentError::Rejected("Pairing rejected".to_string()))
+            }
+            Some(response) => Ok(response),
+            None => Err(AgentError::Canceled("Pairing prompt timed out".to_string())),
+        }
+    }
+
+    fn open_prompt(
+        self: &Arc<Self>,
+        address: String,
+        kind: BluetoothPairingPromptKind,
+    ) -> (u64, async_channel::Receiver<PromptAnswer>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = async_channel::bounded(1);
         if let Some(previous) = self.pending.lock().unwrap().replace(PendingPairing {
             id,
             address: address.clone(),
             response: sender,
         }) {
-            let _ = previous.response.send(BluetoothPairingResponse::Reject);
+            let _ = previous.response.try_send(None);
             let _ = self.events.send(InternalEvent::PromptClosed(previous.id));
         }
         let _ = self
@@ -161,18 +192,24 @@ impl PairingBroker {
                 device_name: String::new(),
                 kind,
             }));
-        let result = receiver.recv_timeout(PAIRING_TIMEOUT);
-        self.pending
+        let broker = Arc::downgrade(self);
+        thread::spawn(move || {
+            thread::sleep(PAIRING_TIMEOUT);
+            if let Some(broker) = broker.upgrade() {
+                broker.expire(id);
+            }
+        });
+        (id, receiver)
+    }
+
+    fn expire(&self, prompt_id: u64) {
+        let pending = self
+            .pending
             .lock()
             .unwrap()
-            .take_if(|pending| pending.id == id);
-        let _ = self.events.send(InternalEvent::PromptClosed(id));
-        match result {
-            Ok(BluetoothPairingResponse::Reject) => {
-                Err(AgentError::Rejected("Pairing rejected".to_string()))
-            }
-            Ok(response) => Ok(response),
-            Err(_) => Err(AgentError::Canceled("Pairing prompt timed out".to_string())),
+            .take_if(|pending| pending.id == prompt_id);
+        if let Some(pending) = pending {
+            let _ = pending.response.try_send(None);
         }
     }
 
@@ -199,8 +236,8 @@ impl PairingBroker {
         };
         pending
             .response
-            .send(response)
-            .context("pairing request is no longer active")
+            .try_send(Some(response))
+            .map_err(|_| anyhow!("pairing request is no longer active"))
     }
 
     fn reject_address(&self, address: &str) {
@@ -210,16 +247,22 @@ impl PairingBroker {
             .unwrap()
             .take_if(|pending| pending.address == address);
         if let Some(pending) = pending {
-            let _ = pending.response.send(BluetoothPairingResponse::Reject);
+            let _ = pending
+                .response
+                .try_send(Some(BluetoothPairingResponse::Reject));
             let _ = self.events.send(InternalEvent::PromptClosed(pending.id));
         }
     }
 
+    /// BlueZ cancelled the request, so drop any prompt, including codes that
+    /// were only displayed and never had a pending answer.
     fn cancel_current(&self) {
         if let Some(pending) = self.pending.lock().unwrap().take() {
-            let _ = pending.response.send(BluetoothPairingResponse::Reject);
-            let _ = self.events.send(InternalEvent::PromptClosed(pending.id));
+            let _ = pending
+                .response
+                .try_send(Some(BluetoothPairingResponse::Reject));
         }
+        let _ = self.events.send(InternalEvent::PromptsCleared);
     }
 }
 
@@ -242,11 +285,14 @@ impl PairingAgent {
         self.broker.cancel_current();
     }
 
-    fn request_pin_code(&self, device: OwnedObjectPath) -> Result<String, AgentError> {
-        let response = self.broker.ask(
-            address_from_path(device.as_str()),
-            BluetoothPairingPromptKind::EnterPinCode,
-        )?;
+    async fn request_pin_code(&self, device: OwnedObjectPath) -> Result<String, AgentError> {
+        let response = self
+            .broker
+            .ask(
+                address_from_path(device.as_str()),
+                BluetoothPairingPromptKind::EnterPinCode,
+            )
+            .await?;
         match response {
             BluetoothPairingResponse::PinCode(value)
                 if !value.is_empty()
@@ -268,11 +314,15 @@ impl PairingAgent {
         );
     }
 
-    fn request_passkey(&self, device: OwnedObjectPath) -> Result<u32, AgentError> {
-        match self.broker.ask(
-            address_from_path(device.as_str()),
-            BluetoothPairingPromptKind::EnterPasskey,
-        )? {
+    async fn request_passkey(&self, device: OwnedObjectPath) -> Result<u32, AgentError> {
+        match self
+            .broker
+            .ask(
+                address_from_path(device.as_str()),
+                BluetoothPairingPromptKind::EnterPasskey,
+            )
+            .await?
+        {
             BluetoothPairingResponse::Passkey(value) if value <= 999_999 => Ok(value),
             _ => Err(AgentError::Rejected(
                 "A valid passkey is required".to_string(),
@@ -287,15 +337,19 @@ impl PairingAgent {
         );
     }
 
-    fn request_confirmation(
+    async fn request_confirmation(
         &self,
         device: OwnedObjectPath,
         passkey: u32,
     ) -> Result<(), AgentError> {
-        match self.broker.ask(
-            address_from_path(device.as_str()),
-            BluetoothPairingPromptKind::ConfirmPasskey { passkey },
-        )? {
+        match self
+            .broker
+            .ask(
+                address_from_path(device.as_str()),
+                BluetoothPairingPromptKind::ConfirmPasskey { passkey },
+            )
+            .await?
+        {
             BluetoothPairingResponse::Accept => Ok(()),
             _ => Err(AgentError::Rejected(
                 "Passkey was not confirmed".to_string(),
@@ -303,11 +357,15 @@ impl PairingAgent {
         }
     }
 
-    fn request_authorization(&self, device: OwnedObjectPath) -> Result<(), AgentError> {
-        match self.broker.ask(
-            address_from_path(device.as_str()),
-            BluetoothPairingPromptKind::Authorize,
-        )? {
+    async fn request_authorization(&self, device: OwnedObjectPath) -> Result<(), AgentError> {
+        match self
+            .broker
+            .ask(
+                address_from_path(device.as_str()),
+                BluetoothPairingPromptKind::Authorize,
+            )
+            .await?
+        {
             BluetoothPairingResponse::Accept => Ok(()),
             _ => Err(AgentError::Rejected(
                 "Pairing was not authorized".to_string(),
@@ -518,9 +576,21 @@ impl ControllerState<'_> {
                     self.pairing_prompt = None;
                 }
             }
+            InternalEvent::PromptsCleared => {
+                self.pairing_prompt = None;
+            }
             InternalEvent::OperationFinished { address, result } => {
                 self.operations.remove(&address);
                 self.broker.finish_pairing(&address);
+                // Displayed codes have no answer to wait for, so they only
+                // close once the pairing call that produced them returns.
+                if self
+                    .pairing_prompt
+                    .as_ref()
+                    .is_some_and(|prompt| prompt.address == address)
+                {
+                    self.pairing_prompt = None;
+                }
                 match result {
                     Ok(()) => {
                         self.errors.remove(&address);
@@ -619,8 +689,23 @@ impl ControllerState<'_> {
         let Some(path) = header.path() else {
             return;
         };
-        let address = address_from_path(path.as_str());
-        if address != path.as_str() {
+        // Devices found for the first time arrive as InterfacesAdded on the
+        // root object manager, so the device path is in the body.
+        let path = if header
+            .member()
+            .is_some_and(|member| member == "InterfacesAdded")
+        {
+            match message.body().deserialize::<(
+                OwnedObjectPath,
+                HashMap<String, HashMap<String, OwnedValue>>,
+            )>() {
+                Ok((device, _)) => device.to_string(),
+                Err(_) => return,
+            }
+        } else {
+            path.to_string()
+        };
+        if let Some(address) = device_address_from_path(&path) {
             self.nearby_seen.insert(address, Instant::now());
         }
     }
@@ -710,10 +795,11 @@ fn bluez_proxy<'a>(
 }
 
 fn bluez_signal_stream(connection: &Connection) -> Result<MessageIterator> {
+    // No path filter: BlueZ announces new devices from its object manager at
+    // `/`, outside the `/org/bluez` namespace that carries property changes.
     let rule = MatchRule::builder()
         .msg_type(Type::Signal)
         .sender(BLUEZ_DESTINATION)?
-        .path_namespace(BLUEZ_PATH_NAMESPACE)?
         .build();
     MessageIterator::for_match_rule(rule, connection, Some(64))
         .context("failed to subscribe to BlueZ signals")
@@ -751,6 +837,7 @@ fn parse_managed_objects(managed: ManagedObjects) -> Result<ParsedBluetoothState
         };
         let address =
             string_property(device, "Address").unwrap_or_else(|| address_from_path(path.as_str()));
+        let named = string_property(device, "Name").is_some_and(|name| !name.trim().is_empty());
         let name = string_property(device, "Alias")
             .or_else(|| string_property(device, "Name"))
             .filter(|name| !name.trim().is_empty())
@@ -764,6 +851,7 @@ fn parse_managed_objects(managed: ManagedObjects) -> Result<ParsedBluetoothState
             path: path.to_string(),
             address,
             name,
+            named,
             icon_name: device_icon(bluez_icon.as_deref(), audio_capable).to_string(),
             paired: bool_property(device, "Paired").unwrap_or(false),
             trusted: bool_property(device, "Trusted").unwrap_or(false),
@@ -802,7 +890,9 @@ fn build_bluetooth_state(
         .devices
         .into_iter()
         .filter(|device| {
-            device.paired || device.connected || nearby_seen.contains_key(&device.address)
+            device.paired
+                || device.connected
+                || (device.named && nearby_seen.contains_key(&device.address))
         })
         .map(|device| BluetoothDeviceState {
             operation: operations.get(&device.address).copied(),
@@ -853,9 +943,14 @@ fn build_bluetooth_state(
 }
 
 fn address_from_path(path: &str) -> String {
-    path.rsplit_once("/dev_")
-        .map(|(_, address)| address.replace('_', ":"))
-        .unwrap_or_else(|| path.to_string())
+    device_address_from_path(path).unwrap_or_else(|| path.to_string())
+}
+
+fn device_address_from_path(path: &str) -> Option<String> {
+    let (_, tail) = path.rsplit_once("/dev_")?;
+    // Service and characteristic objects live below the device path.
+    let address = tail.split('/').next()?;
+    Some(address.replace('_', ":"))
 }
 
 fn short_address(address: &str) -> String {
@@ -920,14 +1015,15 @@ fn device_icon(icon: Option<&str>, audio_capable: bool) -> &'static str {
 mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::sync::{Arc, mpsc};
-    use std::thread;
     use std::time::Instant;
+
+    use zbus::zvariant::OwnedObjectPath;
 
     use crate::{BluetoothDeviceOperation, BluetoothPairingPromptKind, BluetoothPairingResponse};
 
     use super::{
         DeviceRecord, InternalEvent, PairingBroker, ParsedBluetoothState, address_from_path,
-        build_bluetooth_state, device_icon, short_address,
+        build_bluetooth_state, device_address_from_path, device_icon, short_address,
     };
 
     #[test]
@@ -1007,17 +1103,61 @@ mod tests {
     }
 
     #[test]
+    fn state_hides_nameless_scan_results_but_keeps_nameless_saved_devices() {
+        let mut beacon = device(
+            "AA:00:00:00:00:05",
+            "AA-00-00-00-00-05",
+            false,
+            false,
+            false,
+        );
+        beacon.named = false;
+        let mut saved = device("AA:00:00:00:00:06", "AA-00-00-00-00-06", true, false, false);
+        saved.named = false;
+        let parsed = ParsedBluetoothState {
+            available: true,
+            powered: true,
+            discovering: true,
+            adapter_path: Some("/org/bluez/hci0".to_string()),
+            devices: vec![beacon, saved],
+        };
+        let nearby = HashMap::from([
+            ("AA:00:00:00:00:05".to_string(), Instant::now()),
+            ("AA:00:00:00:00:06".to_string(), Instant::now()),
+        ]);
+
+        let state = build_bluetooth_state(
+            parsed,
+            &nearby,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+        );
+
+        assert_eq!(state.devices.len(), 1);
+        assert_eq!(state.devices[0].address, "AA:00:00:00:00:06");
+    }
+
+    #[test]
+    fn device_addresses_ignore_service_children() {
+        assert_eq!(
+            device_address_from_path("/org/bluez/hci0/dev_88_C9_E8_25_7B_04/service0012/char0013")
+                .as_deref(),
+            Some("88:C9:E8:25:7B:04")
+        );
+        assert_eq!(device_address_from_path("/org/bluez/hci0"), None);
+    }
+
+    #[test]
     fn pairing_broker_round_trips_inline_confirmation() {
         let (events, receiver) = mpsc::channel();
         let broker = Arc::new(PairingBroker::new(events));
         broker.begin_pairing("AA:BB:CC:DD:EE:FF");
-        let broker_for_prompt = broker.clone();
-        let waiter = thread::spawn(move || {
-            broker_for_prompt.ask(
-                "AA:BB:CC:DD:EE:FF".to_string(),
-                BluetoothPairingPromptKind::ConfirmPasskey { passkey: 42 },
-            )
-        });
+        let (_, answer) = broker.open_prompt(
+            "AA:BB:CC:DD:EE:FF".to_string(),
+            BluetoothPairingPromptKind::ConfirmPasskey { passkey: 42 },
+        );
         let prompt_id = match receiver.recv().unwrap() {
             InternalEvent::PromptOpened(prompt) => prompt.id,
             event => panic!("unexpected event: {event:?}"),
@@ -1026,9 +1166,78 @@ mod tests {
             .respond(prompt_id, BluetoothPairingResponse::Accept)
             .unwrap();
         assert_eq!(
-            waiter.join().unwrap().unwrap(),
-            BluetoothPairingResponse::Accept
+            answer.recv_blocking().unwrap(),
+            Some(BluetoothPairingResponse::Accept)
         );
+    }
+
+    #[test]
+    fn pairing_broker_expires_and_supersedes_prompts_without_an_answer() {
+        let (events, _receiver) = mpsc::channel();
+        let broker = Arc::new(PairingBroker::new(events));
+        let (first_id, first) =
+            broker.open_prompt("AA".to_string(), BluetoothPairingPromptKind::Authorize);
+        let (second_id, second) =
+            broker.open_prompt("BB".to_string(), BluetoothPairingPromptKind::Authorize);
+        assert_eq!(first.recv_blocking().unwrap(), None);
+
+        broker.expire(first_id);
+        assert!(second.try_recv().is_err());
+        broker.expire(second_id);
+        assert_eq!(second.recv_blocking().unwrap(), None);
+        assert!(
+            broker
+                .respond(second_id, BluetoothPairingResponse::Accept)
+                .is_err()
+        );
+    }
+
+    /// Needs a session bus: `dbus-run-session -- cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn pending_agent_prompt_leaves_the_connection_responsive() {
+        use std::time::{Duration, Instant};
+        use zbus::blocking::{Connection, Proxy, fdo::DBusProxy};
+
+        let (events, receiver) = mpsc::channel();
+        let broker = Arc::new(PairingBroker::new(events));
+        let server = Connection::session().unwrap();
+        server
+            .object_server()
+            .at(
+                super::BAR_AGENT_PATH,
+                super::PairingAgent {
+                    broker: broker.clone(),
+                },
+            )
+            .unwrap();
+        let server_name = server.unique_name().unwrap().to_string();
+        let caller = std::thread::spawn(move || {
+            let client = Connection::session().unwrap();
+            let agent = Proxy::new(
+                &client,
+                server_name.as_str(),
+                super::BAR_AGENT_PATH,
+                "org.bluez.Agent1",
+            )
+            .unwrap();
+            let device =
+                OwnedObjectPath::try_from("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF").unwrap();
+            agent.call::<_, _, ()>("RequestConfirmation", &(device, 123_456_u32))
+        });
+        let prompt_id = match receiver.recv_timeout(Duration::from_secs(5)).unwrap() {
+            InternalEvent::PromptOpened(prompt) => prompt.id,
+            event => panic!("unexpected event: {event:?}"),
+        };
+
+        let started = Instant::now();
+        DBusProxy::new(&server).unwrap().list_names().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        broker
+            .respond(prompt_id, BluetoothPairingResponse::Accept)
+            .unwrap();
+        caller.join().unwrap().unwrap();
     }
 
     fn device(
@@ -1042,6 +1251,7 @@ mod tests {
             path: format!("/org/bluez/hci0/dev_{}", address.replace(':', "_")),
             address: address.to_string(),
             name: name.to_string(),
+            named: true,
             icon_name: device_icon(None, audio_capable).to_string(),
             paired,
             trusted: paired,
