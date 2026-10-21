@@ -73,8 +73,12 @@ impl WorkspacePill {
         pill.set_visible(false);
         layer.put(&pill, 0.0, 0.0);
 
+        // Both are overlays so only the strip is measured: the pill copies the
+        // buttons' allocated height, and measuring it would feed any spare
+        // height back into the strip and grow the bar on every frame. Overlays
+        // draw in insertion order, so the pill stays beneath the buttons.
         let root = gtk::Overlay::new();
-        root.set_child(Some(&layer));
+        root.add_overlay(&layer);
         root.add_overlay(strip);
         root.set_measure_overlay(strip, true);
         strip.add_css_class("has-pill");
