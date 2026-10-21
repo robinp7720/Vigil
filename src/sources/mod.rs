@@ -153,11 +153,8 @@ pub fn spawn_clock_source(
     cancelled: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
+        // Publish right away so the clock is not blank until the first minute boundary.
         loop {
-            if !sleep_until_next_minute_boundary(&cancelled) {
-                break;
-            }
-
             let epoch_seconds = current_epoch_seconds();
             let update = StateUpdate::System(SystemUpdate::Clock(ClockState {
                 epoch_seconds,
@@ -166,6 +163,10 @@ pub fn spawn_clock_source(
 
             if sender.send(update).is_err() {
                 cancelled.store(true, Ordering::Relaxed);
+                break;
+            }
+
+            if !sleep_until_next_minute_boundary(&cancelled) {
                 break;
             }
         }
@@ -258,7 +259,29 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use super::{CancellableRecv, RETRY_DELAYS, RetryState, recv_with_cancellation};
+    use super::{
+        CancellableRecv, RETRY_DELAYS, RetryState, recv_with_cancellation, spawn_clock_source,
+    };
+    use crate::{StateUpdate, SystemUpdate};
+
+    #[test]
+    fn clock_source_publishes_immediately_on_start() {
+        let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let handle = spawn_clock_source(sender, cancelled.clone());
+
+        let update = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("clock update before the next minute boundary");
+        cancelled.store(true, Ordering::Relaxed);
+        handle.join().expect("join clock source");
+
+        let StateUpdate::System(SystemUpdate::Clock(clock)) = update else {
+            panic!("expected a clock update, got {update:?}");
+        };
+        assert!(clock.epoch_seconds > 0);
+        assert!(!clock.label.is_empty());
+    }
 
     #[test]
     fn retry_state_uses_the_required_backoff_sequence() {
