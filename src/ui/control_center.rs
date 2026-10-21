@@ -4696,9 +4696,18 @@ fn begin_calendar_load(
     if let Some(sender) = sender {
         let _ = sender.send(CalendarMonthRequest {
             year: calendar.year(),
-            month: u32::try_from(calendar.month()).unwrap_or(1),
+            month: calendar_month(calendar),
         });
     }
+}
+
+/// The displayed month as 1–12; `gtk::Calendar::month()` counts from zero.
+fn calendar_month(calendar: &gtk::Calendar) -> u32 {
+    calendar_month_from_gtk(calendar.month())
+}
+
+fn calendar_month_from_gtk(month: i32) -> u32 {
+    u32::try_from(month.clamp(0, 11) + 1).unwrap_or(1)
 }
 
 fn request_calendar_month(page: &TimePage) {
@@ -4753,8 +4762,7 @@ fn local_date_label(epoch: i64) -> String {
 fn update_calendar_marks(calendar: &gtk::Calendar, agenda: Option<&CalendarAgenda>) {
     calendar.clear_marks();
     let Some(agenda) = agenda.filter(|agenda| {
-        agenda.year == calendar.year()
-            && agenda.month == u32::try_from(calendar.month()).unwrap_or_default()
+        agenda.year == calendar.year() && agenda.month == calendar_month(calendar)
     }) else {
         return;
     };
@@ -4778,7 +4786,7 @@ fn render_agenda(
     action: &ActionHandle,
 ) {
     let year = calendar.year();
-    let month = u32::try_from(calendar.month()).unwrap_or(1);
+    let month = calendar_month(calendar);
     let day = calendar.day();
     let matching = spec
         .calendar_agenda
@@ -5193,6 +5201,15 @@ mod tests {
         metric_visual, notification_age_label, notification_image_presentation,
         quick_grid_placements, timer_action_state, volume_icon_name,
     };
+
+    #[test]
+    fn gtk_calendar_months_are_zero_based() {
+        use super::calendar_month_from_gtk;
+
+        assert_eq!(calendar_month_from_gtk(0), 1);
+        assert_eq!(calendar_month_from_gtk(9), 10);
+        assert_eq!(calendar_month_from_gtk(11), 12);
+    }
 
     #[test]
     fn panel_stage_origin_falls_back_in_order() {
