@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
@@ -6,7 +7,7 @@ use std::sync::{
     mpsc::{self, Receiver, Sender, TryRecvError},
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -18,8 +19,12 @@ use crate::{
 
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Neighbouring months older than this are fetched again in the background.
+const PREFETCH_MAX_AGE: Duration = Duration::from_secs(300);
+/// Cached months older than this are dropped instead of being shown while loading.
+const MONTH_CACHE_MAX_AGE: Duration = Duration::from_secs(1800);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CalendarMonthRequest {
     pub year: i32,
     pub month: u32,
@@ -31,6 +36,34 @@ impl CalendarMonthRequest {
             bail!("calendar month must be between 1 and 12");
         }
         Ok(Self { year, month })
+    }
+
+    fn previous(self) -> Self {
+        if self.month == 1 {
+            Self {
+                year: self.year - 1,
+                month: 12,
+            }
+        } else {
+            Self {
+                month: self.month - 1,
+                ..self
+            }
+        }
+    }
+
+    fn next(self) -> Self {
+        if self.month == 12 {
+            Self {
+                year: self.year + 1,
+                month: 1,
+            }
+        } else {
+            Self {
+                month: self.month + 1,
+                ..self
+            }
+        }
     }
 
     fn range(self) -> (String, String) {
@@ -130,16 +163,30 @@ pub fn spawn_calendar_agenda_source(
     let (request_sender, request_receiver) = mpsc::channel();
     let handle = thread::spawn(move || {
         let mut active_request = None;
+        let mut pending_request = None;
         let mut elapsed = POLL_INTERVAL;
+        let mut months: HashMap<CalendarMonthRequest, (CalendarAgenda, Instant)> = HashMap::new();
         loop {
             if cancelled.load(Ordering::Relaxed) {
                 break;
             }
 
-            match request_receiver.recv_timeout(CANCEL_POLL_INTERVAL) {
+            let received = match pending_request.take() {
+                Some(request) => Ok(request),
+                None => request_receiver.recv_timeout(CANCEL_POLL_INTERVAL),
+            };
+            match received {
                 Ok(request) => {
-                    active_request = Some(latest_request(request, &request_receiver));
+                    let request = latest_request(request, &request_receiver);
+                    active_request = Some(request);
                     elapsed = POLL_INTERVAL;
+                    months.retain(|_, (_, fetched)| fetched.elapsed() < MONTH_CACHE_MAX_AGE);
+                    // Show the remembered month at once; the fetch below refreshes it.
+                    if let Some((agenda, _)) = months.get(&request)
+                        && !send_agenda(&sender, agenda.clone())
+                    {
+                        break;
+                    }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     elapsed = elapsed.saturating_add(CANCEL_POLL_INTERVAL);
@@ -153,10 +200,48 @@ pub fn spawn_calendar_agenda_source(
             let Some(request) = active_request else {
                 continue;
             };
-            if !publish_agenda(&script_path, request, &sender) {
+            let published = match read_calendar_agenda(&script_path, request) {
+                Ok(agenda) => {
+                    months.insert(request, (agenda.clone(), Instant::now()));
+                    send_agenda(&sender, agenda)
+                }
+                Err(error) => sender
+                    .send(StateUpdate::Health {
+                        source: SourceId::CalendarAgenda,
+                        health: SourceHealth::Disconnected {
+                            message: error.to_string(),
+                        },
+                    })
+                    .is_ok(),
+            };
+            if !published {
                 break;
             }
             elapsed = Duration::ZERO;
+
+            for neighbour in [request.next(), request.previous()] {
+                if months
+                    .get(&neighbour)
+                    .is_some_and(|(_, fetched)| fetched.elapsed() < PREFETCH_MAX_AGE)
+                {
+                    continue;
+                }
+                // A new request from the panel wins over prefetching.
+                match request_receiver.try_recv() {
+                    Ok(request) => {
+                        pending_request = Some(request);
+                        break;
+                    }
+                    Err(TryRecvError::Disconnected) => break,
+                    Err(TryRecvError::Empty) => {}
+                }
+                if cancelled.load(Ordering::Relaxed) {
+                    break;
+                }
+                if let Ok(agenda) = read_calendar_agenda(&script_path, neighbour) {
+                    months.insert(neighbour, (agenda, Instant::now()));
+                }
+            }
         }
     });
     (request_sender, handle)
@@ -175,34 +260,18 @@ fn latest_request(
     }
 }
 
-fn publish_agenda(
-    script_path: &Path,
-    request: CalendarMonthRequest,
-    sender: &Sender<StateUpdate>,
-) -> bool {
-    match read_calendar_agenda(script_path, request) {
-        Ok(agenda) => {
-            sender
-                .send(StateUpdate::System(SystemUpdate::CalendarAgenda(Some(
-                    agenda,
-                ))))
-                .is_ok()
-                && sender
-                    .send(StateUpdate::Health {
-                        source: SourceId::CalendarAgenda,
-                        health: SourceHealth::Healthy,
-                    })
-                    .is_ok()
-        }
-        Err(error) => sender
+fn send_agenda(sender: &Sender<StateUpdate>, agenda: CalendarAgenda) -> bool {
+    sender
+        .send(StateUpdate::System(SystemUpdate::CalendarAgenda(Some(
+            agenda,
+        ))))
+        .is_ok()
+        && sender
             .send(StateUpdate::Health {
                 source: SourceId::CalendarAgenda,
-                health: SourceHealth::Disconnected {
-                    message: error.to_string(),
-                },
+                health: SourceHealth::Healthy,
             })
-            .is_ok(),
-    }
+            .is_ok()
 }
 
 fn read_calendar_agenda(

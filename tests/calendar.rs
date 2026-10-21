@@ -278,3 +278,81 @@ printf '%s\n' '{"healthy":true,"range_start":"2027-01-01","range_end":"2027-02-0
         }
     );
 }
+
+#[test]
+fn agenda_source_prefetches_neighbours_and_serves_them_instantly() {
+    let temp_dir = unique_temp_dir("calendar-prefetch");
+    fs::create_dir_all(&temp_dir).expect("create temp dir");
+    let script_path = temp_dir.join("next_event.sh");
+    let log_path = temp_dir.join("requests.log");
+    let slow_marker = temp_dir.join("slow");
+    write_script(
+        &script_path,
+        &format!(
+            r#"#!/usr/bin/env bash
+printf '%s\n' "$3" >> '{log}'
+[[ -e '{slow}' ]] && sleep 2
+printf '{{"healthy":true,"range_start":"%s","range_end":"%s","events":[]}}\n' "$3" "$5"
+"#,
+            log = log_path.display(),
+            slow = slow_marker.display(),
+        ),
+    );
+
+    let (sender, receiver) = mpsc::channel();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let (request_sender, handle) =
+        spawn_calendar_agenda_source(script_path, sender, cancelled.clone());
+    request_sender
+        .send(CalendarMonthRequest::new(2027, 1).expect("request"))
+        .expect("send month");
+
+    let first = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("january agenda");
+    assert!(matches!(
+        first,
+        StateUpdate::System(SystemUpdate::CalendarAgenda(Some(CalendarAgenda {
+            year: 2027,
+            month: 1,
+            ..
+        })))
+    ));
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let log = fs::read_to_string(&log_path).unwrap_or_default();
+        if log.contains("2026-12-01") && log.contains("2027-02-01") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "neighbouring months were not prefetched: {log:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    while receiver.try_recv().is_ok() {}
+    fs::write(&slow_marker, "").expect("slow marker");
+
+    request_sender
+        .send(CalendarMonthRequest::new(2027, 2).expect("request"))
+        .expect("send month");
+    let cached = receiver
+        .recv_timeout(Duration::from_millis(300))
+        .expect("prefetched february agenda without waiting on the backend");
+
+    cancelled.store(true, Ordering::Relaxed);
+    drop(request_sender);
+    handle.join().expect("join agenda source");
+    fs::remove_dir_all(&temp_dir).ok();
+
+    assert_eq!(
+        cached,
+        StateUpdate::System(SystemUpdate::CalendarAgenda(Some(CalendarAgenda {
+            year: 2027,
+            month: 2,
+            events: Vec::new(),
+        })))
+    );
+}
