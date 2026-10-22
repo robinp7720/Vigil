@@ -43,6 +43,11 @@ enum Command {
         #[arg(long, global = true)]
         output: Option<String>,
     },
+    /// Read or control the media player Vigil shows.
+    Media {
+        #[command(subcommand)]
+        command: MediaCommand,
+    },
     #[command(name = "__test_control_server", hide = true)]
     TestControlServer {
         #[arg(long, default_value_t = 1)]
@@ -135,6 +140,28 @@ enum OsdCommand {
     Hide,
 }
 
+#[derive(Debug, clap::Subcommand)]
+enum MediaCommand {
+    /// Print the active player as JSON (`{"media":null}` when nothing plays).
+    Get,
+    PlayPause,
+    Next,
+    Previous,
+}
+
+fn media_request(command: MediaCommand) -> vigil::ControlRequest {
+    let action = match command {
+        MediaCommand::Get => return vigil::ControlRequest::MediaGet,
+        MediaCommand::PlayPause => vigil::MediaControlAction::PlayPause,
+        MediaCommand::Next => vigil::MediaControlAction::Next,
+        MediaCommand::Previous => vigil::MediaControlAction::Previous,
+    };
+    vigil::ControlRequest::MediaControl {
+        action,
+        player: None,
+    }
+}
+
 fn default_config_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -191,6 +218,18 @@ fn run_cli(cli: Cli) -> Result<()> {
         Some(Command::Osd { command, output }) => {
             let response = vigil::ControlClient::new()?.send(&osd_request(command, output)?)?;
             handle_control_response(response)
+        }
+        Some(Command::Media { command }) => {
+            let response = vigil::ControlClient::new()?.send(&media_request(command))?;
+            match response {
+                vigil::ControlResponse::ActionResult {
+                    success: false,
+                    message,
+                } => Err(anyhow!(
+                    message.unwrap_or_else(|| "media action failed".to_string())
+                )),
+                other => handle_control_response(other),
+            }
         }
         Some(Command::TestControlServer { requests }) => vigil::run_test_control_server(requests),
         Some(Command::Preview { scenario }) => vigil::run_preview(&cli.config, &scenario),

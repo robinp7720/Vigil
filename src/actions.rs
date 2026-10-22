@@ -304,6 +304,7 @@ impl ActionBackend for SystemActionBackend {
             | ControlResponse::Notifications { .. }
             | ControlResponse::Presentation { .. }
             | ControlResponse::Lockscreen { .. }
+            | ControlResponse::Media { .. }
             | ControlResponse::ActionResult { success: true, .. } => Ok(()),
             ControlResponse::ActionResult {
                 success: false,

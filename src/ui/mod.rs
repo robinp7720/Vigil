@@ -36,13 +36,13 @@ use tracing::warn;
 use crate::swipe::SwipeFeed;
 use crate::{
     ActionCompletion, ActionRequest, ActionResult, ActionRouter, ActivityStatus, ActivityTracker,
-    ActivityUpdate, AppConfig, CalendarMonthRequest, CommandActivity, ControlRequest,
-    ControlResponse, ControlSocket, NotificationControl, ReloadStatus, SourceHealth, SourceId,
-    StateStore, StateUpdate, SuggestionEngine, SystemActionBackend, SystemUpdate, TimerStore,
-    context_snapshots, detect_compositor, intent_for_context_action, reload_runtime_config,
-    spawn_action_worker, spawn_audio_source, spawn_bluetooth_source, spawn_brightness_source,
-    spawn_calendar_agenda_source, spawn_clock_source, spawn_media_source, spawn_network_source,
-    spawn_notification_server, spawn_power_source, spawn_resource_source,
+    ActivityUpdate, AppConfig, CalendarMonthRequest, CommandActivity, ContextAction,
+    ControlRequest, ControlResponse, ControlSocket, NotificationControl, ReloadStatus,
+    SourceHealth, SourceId, StateStore, StateUpdate, SuggestionEngine, SystemActionBackend,
+    SystemUpdate, TimerStore, context_snapshots, detect_compositor, intent_for_context_action,
+    reload_runtime_config, spawn_action_worker, spawn_audio_source, spawn_bluetooth_source,
+    spawn_brightness_source, spawn_calendar_agenda_source, spawn_clock_source, spawn_media_source,
+    spawn_network_source, spawn_notification_server, spawn_power_source, spawn_resource_source,
 };
 
 pub use surface::{PrimarySurface, ReducedSurface, SurfaceRegistry, surface_specs};
@@ -990,7 +990,9 @@ fn handle_control_request(
         | ControlRequest::PresentationGet
         | ControlRequest::PresentationSet { .. }
         | ControlRequest::OsdShow { .. }
-        | ControlRequest::OsdHide) => {
+        | ControlRequest::OsdHide
+        | ControlRequest::MediaGet
+        | ControlRequest::MediaControl { .. }) => {
             let (response_tx, response_rx) = mpsc::channel();
             control_tx
                 .send(UiControlRequest {
@@ -1004,6 +1006,42 @@ fn handle_control_request(
                 .recv_timeout(CONTROL_UI_RESPONSE_TIMEOUT)
                 .map_err(|_| anyhow!("bar UI did not answer the integration request"))
         }
+    }
+}
+
+fn execute_control_action(
+    runtime: &mut UiRuntime,
+    action: ContextAction,
+    response_tx: Sender<ControlResponse>,
+) {
+    let intent = match intent_for_context_action(runtime.store.snapshot(), action) {
+        Ok(intent) => intent,
+        Err(error) => {
+            let _ = response_tx.send(ControlResponse::ActionResult {
+                success: false,
+                message: Some(error.to_string()),
+            });
+            return;
+        }
+    };
+    runtime.next_control_action_id = runtime.next_control_action_id.wrapping_add(1);
+    let origin = format!("luma-context:{}", runtime.next_control_action_id);
+    runtime
+        .pending_control_actions
+        .insert(origin.clone(), response_tx.clone());
+    if runtime
+        .action_tx
+        .send(ActionRequest {
+            origin: origin.clone(),
+            intent,
+        })
+        .is_err()
+    {
+        runtime.pending_control_actions.remove(&origin);
+        let _ = response_tx.send(ControlResponse::ActionResult {
+            success: false,
+            message: Some("bar action worker is unavailable".to_string()),
+        });
     }
 }
 
@@ -1021,34 +1059,34 @@ fn drain_control_requests(runtime: &mut UiRuntime) {
                     .send(ControlResponse::Contexts { contexts });
             }
             ControlRequest::ContextExecute { action } => {
-                let intent = match intent_for_context_action(runtime.store.snapshot(), action) {
-                    Ok(intent) => intent,
-                    Err(error) => {
+                execute_control_action(runtime, action, request.response_tx);
+            }
+            ControlRequest::MediaGet => {
+                let media = runtime.store.snapshot().system.media.clone();
+                let _ = request.response_tx.send(ControlResponse::Media { media });
+            }
+            ControlRequest::MediaControl { action, player } => {
+                let player = player.or_else(|| {
+                    runtime
+                        .store
+                        .snapshot()
+                        .system
+                        .media
+                        .as_ref()
+                        .map(|media| media.player.clone())
+                });
+                match player {
+                    Some(player) => execute_control_action(
+                        runtime,
+                        ContextAction::ControlMedia { player, action },
+                        request.response_tx,
+                    ),
+                    None => {
                         let _ = request.response_tx.send(ControlResponse::ActionResult {
                             success: false,
-                            message: Some(error.to_string()),
+                            message: Some("no media player is active".to_string()),
                         });
-                        continue;
                     }
-                };
-                runtime.next_control_action_id = runtime.next_control_action_id.wrapping_add(1);
-                let origin = format!("luma-context:{}", runtime.next_control_action_id);
-                runtime
-                    .pending_control_actions
-                    .insert(origin.clone(), request.response_tx.clone());
-                if runtime
-                    .action_tx
-                    .send(ActionRequest {
-                        origin: origin.clone(),
-                        intent,
-                    })
-                    .is_err()
-                {
-                    runtime.pending_control_actions.remove(&origin);
-                    let _ = request.response_tx.send(ControlResponse::ActionResult {
-                        success: false,
-                        message: Some("bar action worker is unavailable".to_string()),
-                    });
                 }
             }
             ControlRequest::ControlCenterOpen { context, output } => {

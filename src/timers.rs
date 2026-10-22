@@ -150,7 +150,9 @@ impl TimerStore {
             | ControlRequest::PresentationGet
             | ControlRequest::PresentationSet { .. }
             | ControlRequest::OsdShow { .. }
-            | ControlRequest::OsdHide => {
+            | ControlRequest::OsdHide
+            | ControlRequest::MediaGet
+            | ControlRequest::MediaControl { .. } => {
                 bail!("timer store cannot apply non-timer control requests");
             }
         }

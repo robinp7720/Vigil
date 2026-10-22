@@ -10,8 +10,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ContextAction, ContextSnapshot, DesktopContext, LockscreenSnapshot, NotificationState,
-    TimerState,
+    ContextAction, ContextSnapshot, DesktopContext, LockscreenSnapshot, MediaControlAction,
+    MediaState, NotificationState, TimerState,
 };
 
 const TRY_SERVE_READ_TIMEOUT: Duration = Duration::from_millis(50);
@@ -81,6 +81,14 @@ pub enum ControlRequest {
         output: Option<String>,
     },
     OsdHide,
+    /// The player Vigil shows, so scripts and Luma agree on the active one.
+    MediaGet,
+    /// Controls `player`, or the player Vigil shows when it is omitted.
+    MediaControl {
+        action: MediaControlAction,
+        #[serde(default)]
+        player: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +131,9 @@ pub enum ControlResponse {
     },
     Lockscreen {
         snapshot: LockscreenSnapshot,
+    },
+    Media {
+        media: Option<MediaState>,
     },
     ActionResult {
         success: bool,
@@ -523,6 +534,26 @@ mod tests {
                 context: DesktopContext::Bluetooth,
                 output: Some("DP-5".to_string()),
             }
+        );
+    }
+
+    #[test]
+    fn media_protocol_defaults_to_the_shown_player() {
+        assert_eq!(
+            serde_json::from_str::<ControlRequest>(r#"{"type":"media_control","action":"Next"}"#)
+                .unwrap(),
+            ControlRequest::MediaControl {
+                action: crate::MediaControlAction::Next,
+                player: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&ControlRequest::MediaGet).unwrap(),
+            r#"{"type":"media_get"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ControlResponse::Media { media: None }).unwrap(),
+            r#"{"type":"media","media":null}"#
         );
     }
 

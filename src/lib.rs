@@ -119,7 +119,9 @@ pub fn run_test_control_server(requests: usize) -> Result<()> {
             | ControlRequest::PresentationGet
             | ControlRequest::PresentationSet { .. }
             | ControlRequest::OsdShow { .. }
-            | ControlRequest::OsdHide => Ok(ControlResponse::Error {
+            | ControlRequest::OsdHide
+            | ControlRequest::MediaGet
+            | ControlRequest::MediaControl { .. } => Ok(ControlResponse::Error {
                 message: "desktop integration requires the running bar UI".to_string(),
             }),
         })?;

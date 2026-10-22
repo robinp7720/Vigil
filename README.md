@@ -63,8 +63,17 @@ vigil osd hide                          # hypridle on-resume
 The display is a click-through `vigil-osd` layer near the bottom of the
 focused output; Hyprland animates its arrival.
 
+Vigil is the desktop's single source for the active media player. Scripts and
+Luma ask it instead of choosing a player themselves, so the bar, the lock
+screen and the media keys always act on the same one:
+
+```bash
+vigil media get          # {"type":"media","media":{...}} or "media":null
+vigil media play-pause   # also next / previous
+```
+
 Every bar also has a desktop-search button:
-left-click opens Luma on that output, and right-click opens window search.
+left-click opens Luma under the button on that output, and right-click opens window search.
 When supervised by systemd, launched applications get independent user scopes
 with the current Wayland environment. They survive a Vigil restart, and exited
 launcher processes are reaped without blocking the desktop controls.
