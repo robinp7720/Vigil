@@ -115,9 +115,9 @@ impl<B: ActionBackend> ActionRouter<B> {
             ActionIntent::SelectKeyboardLayout { index } => self
                 .backend
                 .execute_compositor(CompositorAction::SelectKeyboardLayout { index }),
-            ActionIntent::OpenLauncher { output } => self
-                .backend
-                .launch_process(ProcessSpec::new("Luma", ["--toggle", "--output", &output])),
+            ActionIntent::OpenLauncher { output } => {
+                self.backend.launch_process(luma_launcher_process(&output))
+            }
             ActionIntent::OpenWindowSearch { output } => {
                 self.backend.launch_process(luma_window_process(&output))
             }
@@ -358,6 +358,13 @@ fn application_process(spec: ProcessSpec, supervised: bool) -> ProcessSpec {
     args.push(spec.program);
     args.extend(spec.args);
     ProcessSpec::new("systemd-run", args)
+}
+
+fn luma_launcher_process(output: &str) -> ProcessSpec {
+    ProcessSpec::new(
+        "Luma",
+        ["--toggle", "--output", output, "--placement", "bar-start"],
+    )
 }
 
 fn luma_window_process(output: &str) -> ProcessSpec {
@@ -803,6 +810,27 @@ mod tests {
         assert_eq!(
             processes,
             vec![ProcessSpec::new("evolution", ["-c", "calendar"])]
+        );
+        assert_no_shell_expansion(&processes);
+    }
+
+    #[test]
+    fn launcher_button_opens_luma_under_the_button() {
+        let state = SpyState::default_shared();
+        let mut router = ActionRouter::new(SpyBackend::new(state.clone()));
+
+        let result = router.execute(ActionIntent::OpenLauncher {
+            output: "DP-3".to_string(),
+        });
+
+        assert_eq!(result, ActionResult::Completed);
+        let processes = state.lock().unwrap().launched_processes.clone();
+        assert_eq!(
+            processes,
+            vec![ProcessSpec::new(
+                "Luma",
+                ["--toggle", "--output", "DP-3", "--placement", "bar-start"],
+            )]
         );
         assert_no_shell_expansion(&processes);
     }
