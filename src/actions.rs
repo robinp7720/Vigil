@@ -200,8 +200,41 @@ impl<B: ActionBackend> ActionRouter<B> {
             ActionIntent::CancelTimer { id } => self
                 .backend
                 .control_timer(ControlRequest::TimerCancel { id }),
+            ActionIntent::SetDisplayMode { mode } => {
+                let spec = display_mode_process(&mode)?;
+                self.backend.execute_service_command(spec)
+            }
+            ActionIntent::ToggleNightLight => self
+                .backend
+                .execute_service_command(dotfiles_process("scripts/night_light.sh", ["toggle"])),
+            ActionIntent::ReapplyTheme => self.backend.execute_service_command(ProcessSpec::new(
+                "systemctl",
+                ["--user", "restart", "awww-wallpaper.service"],
+            )),
         }
     }
+}
+
+/// The monitor layouts `hypr/scripts/modes/` ships; anything else is refused.
+pub const DISPLAY_MODES: [&str; 3] = ["default", "game", "game_external"];
+
+fn display_mode_process(mode: &str) -> Result<ProcessSpec> {
+    if !DISPLAY_MODES.contains(&mode) {
+        bail!("unknown display mode: {mode}");
+    }
+    Ok(dotfiles_process(
+        &format!("hypr/scripts/modes/{mode}.sh"),
+        [] as [&str; 0],
+    ))
+}
+
+fn dotfiles_process<I, S>(relative: &str, args: I) -> ProcessSpec
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let home = std::env::var("HOME").unwrap_or_default();
+    ProcessSpec::new(format!("{home}/.dotfiles/{relative}"), args)
 }
 
 pub fn spawn_action_worker<B>(
@@ -813,6 +846,51 @@ mod tests {
             vec![ProcessSpec::new("evolution", ["-c", "calendar"])]
         );
         assert_no_shell_expansion(&processes);
+    }
+
+    #[test]
+    fn desktop_mode_actions_run_the_shared_scripts() {
+        let state = SpyState::default_shared();
+        let mut router = ActionRouter::new(SpyBackend::new(state.clone()));
+
+        assert_eq!(
+            router.execute(ActionIntent::SetDisplayMode {
+                mode: "game".to_string()
+            }),
+            ActionResult::Completed
+        );
+        assert_eq!(
+            router.execute(ActionIntent::ToggleNightLight),
+            ActionResult::Completed
+        );
+        assert_eq!(
+            router.execute(ActionIntent::ReapplyTheme),
+            ActionResult::Completed
+        );
+        assert!(matches!(
+            router.execute(ActionIntent::SetDisplayMode {
+                mode: "../../evil".to_string()
+            }),
+            ActionResult::Failed { .. }
+        ));
+
+        let commands = state.lock().unwrap().service_commands.clone();
+        assert!(
+            commands[0]
+                .program
+                .ends_with("/.dotfiles/hypr/scripts/modes/game.sh")
+        );
+        assert!(
+            commands[1]
+                .program
+                .ends_with("/.dotfiles/scripts/night_light.sh")
+        );
+        assert_eq!(commands[1].args, vec!["toggle"]);
+        assert_eq!(
+            commands[2],
+            ProcessSpec::new("systemctl", ["--user", "restart", "awww-wallpaper.service"])
+        );
+        assert_eq!(commands.len(), 3);
     }
 
     #[test]

@@ -805,6 +805,13 @@ pub enum ActionIntent {
     CancelTimer {
         id: String,
     },
+    /// A Hyprland monitor layout from `hypr/scripts/modes/`.
+    SetDisplayMode {
+        mode: String,
+    },
+    ToggleNightLight,
+    /// Reapply wallpapers and regenerate the matugen theme from them.
+    ReapplyTheme,
 }
 
 #[cfg(test)]

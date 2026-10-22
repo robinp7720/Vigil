@@ -1935,6 +1935,13 @@ impl ControlCenterView {
         summaries.append(&time_summary_button);
         overview.append(&section_eyebrow("AT A GLANCE"));
         overview.append(&summaries);
+        overview.append(&section_eyebrow("DESKTOP"));
+        overview.append(&desktop_mode_row(ActionHandle {
+            sender: action_sender.clone(),
+            errors: errors.clone(),
+            navigation: navigation.clone(),
+            focus: ControlCenterFocus::Overview,
+        }));
         stack.add_named(&overview, Some(ControlCenterFocus::Overview.as_str()));
 
         let network_page = network_page();
@@ -2900,6 +2907,59 @@ fn section_eyebrow(text: &str) -> gtk::Label {
     label.add_css_class("section-eyebrow");
     label.set_xalign(0.0);
     label
+}
+
+/// Desktop-wide modes that otherwise only exist as scripts: monitor layouts
+/// and the night light (Hyprland only) and regenerating the wallpaper theme.
+fn desktop_mode_row(actions: ActionHandle) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    row.add_css_class("summary-grid");
+    row.add_css_class("desktop-mode-row");
+    row.set_homogeneous(true);
+    let hyprland = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some();
+    let mut tiles = Vec::new();
+    if hyprland {
+        tiles.push((
+            "video-display-symbolic",
+            "Everyday",
+            "Layout",
+            "display-default",
+            ActionIntent::SetDisplayMode {
+                mode: "default".to_string(),
+            },
+        ));
+        tiles.push((
+            "input-gaming-symbolic",
+            "Game",
+            "Layout",
+            "display-game",
+            ActionIntent::SetDisplayMode {
+                mode: "game".to_string(),
+            },
+        ));
+        tiles.push((
+            "night-light-symbolic",
+            "Night light",
+            "Toggle",
+            "night-light",
+            ActionIntent::ToggleNightLight,
+        ));
+    }
+    tiles.push((
+        "preferences-desktop-wallpaper-symbolic",
+        "Theme",
+        "Regenerate",
+        "reapply-theme",
+        ActionIntent::ReapplyTheme,
+    ));
+    for (icon_name, title, value, action, intent) in tiles {
+        let (button, value_label) = summary_tile(icon_name, title);
+        value_label.set_label(value);
+        let actions = actions.clone();
+        button.connect_clicked(move |_| actions.send(action, intent.clone()));
+        row.append(&button);
+    }
+    row
 }
 
 fn summary_tile(icon_name: &str, title: &str) -> (gtk::Button, gtk::Label) {
