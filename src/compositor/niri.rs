@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::Cursor;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::AtomicBool;
@@ -265,6 +265,14 @@ impl NiriAdapter {
     }
 }
 
+// Niri's CLI returns a name-keyed map; retain list support for older fixtures/servers.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum NiriOutputs {
+    List(Vec<NiriOutput>),
+    Map(BTreeMap<String, NiriOutput>),
+}
+
 #[derive(Deserialize)]
 struct NiriOutput {
     name: String,
@@ -307,7 +315,7 @@ fn apply_snapshot(
     windows_json: &str,
     keyboard_layouts_json: &str,
 ) -> Result<Vec<KeyboardLayoutOption>> {
-    let outputs: Vec<NiriOutput> =
+    let outputs: NiriOutputs =
         serde_json::from_str(outputs_json).context("failed to parse niri outputs JSON")?;
     let workspaces: Vec<NiriWorkspace> =
         serde_json::from_str(workspaces_json).context("failed to parse niri workspaces JSON")?;
@@ -316,6 +324,10 @@ fn apply_snapshot(
     let keyboard_layouts: NiriKeyboardLayouts = serde_json::from_str(keyboard_layouts_json)
         .context("failed to parse niri keyboard layouts JSON")?;
 
+    let outputs = match outputs {
+        NiriOutputs::List(outputs) => outputs,
+        NiriOutputs::Map(outputs) => outputs.into_values().collect(),
+    };
     for output in outputs {
         state.ensure_output(&output.name);
         if output.is_focused {

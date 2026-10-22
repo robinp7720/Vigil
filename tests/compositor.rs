@@ -1459,3 +1459,29 @@ fn compositor_detect_rejects_unknown_sessions() {
             && error.contains("HYPRLAND_INSTANCE_SIGNATURE")
     );
 }
+
+#[test]
+fn compositor_niri_accepts_name_keyed_cli_outputs_and_workspace_focus() {
+    let outputs: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("fixtures/niri-snapshot-outputs.json")).unwrap();
+    let outputs = outputs
+        .into_iter()
+        .map(|mut output| {
+            let name = output["name"].as_str().unwrap().to_string();
+            output.as_object_mut().unwrap().remove("is_focused");
+            (name, output)
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let mut adapter = NiriAdapter::new_for_test(
+        &serde_json::to_string(&outputs).unwrap(),
+        include_str!("fixtures/niri-snapshot-workspaces.json"),
+        include_str!("fixtures/niri-snapshot-windows.json"),
+        include_str!("fixtures/niri-snapshot-keyboard-layouts.json"),
+        "",
+        |_, _, _| Ok(()),
+    );
+    assert_eq!(
+        adapter.initial_snapshot().unwrap(),
+        expected_initial_snapshot()
+    );
+}
