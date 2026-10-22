@@ -25,7 +25,7 @@ use super::artwork::{
     ArtworkRequest, prefer_artwork_candidate, result_is_current, spawn_artwork_loader,
 };
 use super::morph::MorphRect;
-use super::morph_bin::{MorphBin, MorphOrigin, MorphShadow};
+use super::morph_bin::{MorphBin, MorphOrigin};
 use super::stage;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1634,6 +1634,7 @@ pub struct ControlCenterView {
     window: gtk::ApplicationWindow,
     stage_box: gtk::Box,
     panel_morph: MorphBin,
+    panel_scroll: gtk::ScrolledWindow,
     motion: Rc<ControlCenterMotion>,
     current: Rc<RefCell<ControlCenterSpec>>,
     navigation: NavigationUi,
@@ -2067,16 +2068,20 @@ impl ControlCenterView {
         panel_morph.set_halign(gtk::Align::End);
         panel_morph.set_valign(gtk::Align::Start);
         panel_morph.set_margin_top(stage::panel_top_in_stage());
-        panel_morph.set_margin_start(28);
-        panel_morph.set_margin_end(28);
-        panel_morph.set_margin_bottom(32);
+        panel_morph.set_margin_start(stage::PANEL_STAGE_MARGIN_X);
+        panel_morph.set_margin_end(stage::PANEL_STAGE_MARGIN_X);
+        panel_morph.set_margin_bottom(0);
         panel_morph.set_radius(stage::CONTROL_CENTER_RADIUS);
-        panel_morph.set_shadow(Some(MorphShadow {
-            dy: 18.0,
-            blur: 48.0,
-            alpha: 0.44,
-        }));
-        panel_morph.set_child(Some(&root));
+        panel_morph.set_shadow(None);
+
+        // Bound the panel on shorter outputs without clipping its footer or input shape.
+        let panel_scroll = gtk::ScrolledWindow::new();
+        panel_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        panel_scroll.set_propagate_natural_height(true);
+        panel_scroll
+            .set_max_content_height(stage::panel_available_height(monitor.geometry().height()));
+        panel_scroll.set_child(Some(&root));
+        panel_morph.set_child(Some(&panel_scroll));
         let stage_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
         stage_box.set_size_request((monitor.geometry().width() - right_margin * 2).max(568), -1);
         stage_box.append(&panel_morph);
@@ -2369,6 +2374,7 @@ impl ControlCenterView {
             window,
             stage_box,
             panel_morph,
+            panel_scroll,
             motion,
             current,
             navigation,
@@ -2433,6 +2439,8 @@ impl ControlCenterView {
 
     pub fn set_monitor(&self, monitor: &gtk::gdk::Monitor) {
         self.window.set_monitor(Some(monitor));
+        self.panel_scroll
+            .set_max_content_height(stage::panel_available_height(monitor.geometry().height()));
     }
 
     pub fn present(&self) {
@@ -5876,7 +5884,7 @@ mod tests {
         let button = MorphRect::new(2300.0, 9.0, 30.0, 28.0);
         assert_eq!(
             panel_origin(Some(button), 2560, 480),
-            MorphOrigin::Local(MorphRect::new(253.0, -45.0, 30.0, 28.0))
+            MorphOrigin::Local(MorphRect::new(220.0, -35.0, 30.0, 28.0))
         );
         assert_eq!(panel_origin(None, 2560, 480), MorphOrigin::Scaled(0.92));
     }

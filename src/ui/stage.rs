@@ -8,11 +8,11 @@ use gtk4::{self as gtk, cairo, prelude::*};
 use super::morph::MorphRect;
 
 pub const BAR_HEIGHT: i32 = 44;
-pub const SURFACE_MARGIN: i32 = 5;
+pub const SURFACE_MARGIN: i32 = 0;
 pub const NOTIFICATION_GAP: i32 = 10;
-pub const PANEL_STAGE_MARGIN_X: i32 = 28;
-pub const CONTROL_CENTER_RADIUS: f32 = 18.0;
-pub const CARD_RADIUS: f32 = 14.0;
+pub const PANEL_STAGE_MARGIN_X: i32 = 0;
+pub const CONTROL_CENTER_RADIUS: f32 = 0.0;
+pub const CARD_RADIUS: f32 = 0.0;
 
 const FALLBACK_TOAST_ORIGIN_WIDTH: f32 = 160.0;
 const FALLBACK_TOAST_ORIGIN_HEIGHT: f32 = 36.0;
@@ -24,6 +24,11 @@ pub fn bar_to_monitor(rect: MorphRect) -> MorphRect {
 
 pub fn panel_top_in_stage() -> i32 {
     BAR_HEIGHT + SURFACE_MARGIN
+}
+
+/// Space available to an edge-attached panel below the reserved bar.
+pub fn panel_available_height(monitor_height: i32) -> i32 {
+    (monitor_height - panel_top_in_stage()).max(1)
 }
 
 pub fn toast_top_in_stage() -> i32 {
@@ -75,7 +80,7 @@ pub fn toast_input_shape(shape: MorphRect) -> Option<MorphRect> {
 }
 
 /// Maps a monitor-space rectangle directly into `panel_morph`'s local coordinates.
-/// Because the panel is top-right aligned (`halign = End`, `margin_end = 28`), its monitor
+/// Because the panel is top-right aligned (`halign = End`, `margin_end = 0`), its monitor
 /// position depends only on `monitor_width` and `panel_width`, never on async stage resizes.
 pub fn monitor_to_panel_local(rect: MorphRect, monitor_width: i32, panel_width: i32) -> MorphRect {
     let panel_left = monitor_width - SURFACE_MARGIN - PANEL_STAGE_MARGIN_X - panel_width;
@@ -155,17 +160,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bar_rects_are_offset_by_the_layer_margins() {
+    fn edge_attached_bar_rects_keep_monitor_coordinates() {
         assert_eq!(
             bar_to_monitor(MorphRect::new(100.0, 4.0, 30.0, 28.0)),
-            MorphRect::new(105.0, 9.0, 30.0, 28.0)
+            MorphRect::new(100.0, 4.0, 30.0, 28.0)
         );
     }
 
     #[test]
-    fn stage_offsets_keep_previous_absolute_positions() {
-        assert_eq!(SURFACE_MARGIN + panel_top_in_stage(), 54);
-        assert_eq!(SURFACE_MARGIN + toast_top_in_stage(), 59);
+    fn panels_attach_below_bar_and_toasts_keep_clearance() {
+        assert_eq!(SURFACE_MARGIN + panel_top_in_stage(), 44);
+        assert_eq!(SURFACE_MARGIN + toast_top_in_stage(), 54);
+    }
+
+    #[test]
+    fn short_outputs_keep_the_whole_panel_scrollable_below_the_bar() {
+        assert_eq!(panel_available_height(800), 756);
+        assert_eq!(panel_available_height(1080), 1036);
+        assert_eq!(panel_available_height(20), 1);
     }
 
     #[test]
@@ -174,9 +186,9 @@ mod tests {
         let near = MorphRect::new(2300.0, 9.0, 30.0, 28.0);
         assert_eq!(control_center_stage_width(512, Some(near), 2560), 512);
         let far = MorphRect::new(1900.0, 9.0, 30.0, 28.0);
-        assert_eq!(control_center_stage_width(512, Some(far), 2560), 655);
+        assert_eq!(control_center_stage_width(512, Some(far), 2560), 660);
         let beyond = MorphRect::new(-50.0, 9.0, 30.0, 28.0);
-        assert_eq!(control_center_stage_width(512, Some(beyond), 1000), 990);
+        assert_eq!(control_center_stage_width(512, Some(beyond), 1000), 1000);
     }
 
     #[test]
@@ -217,11 +229,11 @@ mod tests {
         let rect = MorphRect::new(2300.0, 9.0, 30.0, 28.0);
         assert_eq!(
             monitor_to_top_right_stage(rect, 2560, 512),
-            MorphRect::new(257.0, 4.0, 30.0, 28.0)
+            MorphRect::new(252.0, 9.0, 30.0, 28.0)
         );
         assert_eq!(
             monitor_to_panel_local(rect, 2560, 480),
-            MorphRect::new(253.0, -45.0, 30.0, 28.0)
+            MorphRect::new(220.0, -35.0, 30.0, 28.0)
         );
     }
 
@@ -230,7 +242,7 @@ mod tests {
         let island = MorphRect::new(1080.0, 9.0, 400.0, 36.0);
         assert_eq!(
             toast_origin(Some(island), 2560, 400),
-            MorphRect::new(0.0, 4.0, 400.0, 36.0)
+            MorphRect::new(0.0, 9.0, 400.0, 36.0)
         );
         assert_eq!(
             toast_origin(None, 1920, 400),

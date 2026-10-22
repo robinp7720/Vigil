@@ -26,7 +26,7 @@ use super::control_center::{
     ControlCenterFocus, ControlCenterView, NotificationPresentation, notification_row,
 };
 use super::morph::{self, MorphRect};
-use super::morph_bin::{MorphBin, MorphOrigin, MorphShadow};
+use super::morph_bin::{MorphBin, MorphOrigin};
 use super::popovers::PopoverCoordinator;
 use super::stage::{self, BAR_HEIGHT, SURFACE_MARGIN};
 use super::system::{SystemButtonSpec, SystemCluster, SystemModuleId, build_system_cluster};
@@ -539,11 +539,8 @@ impl SurfaceRegistry {
                 morph.set_follow(false, true);
                 morph.set_start_collapsed(animate);
                 morph.set_radius(stage::CARD_RADIUS);
-                morph.set_shadow(Some(MorphShadow {
-                    dy: 8.0,
-                    blur: 24.0,
-                    alpha: 0.30,
-                }));
+                morph.set_shadow(None);
+
                 morph.set_child(Some(&toast_widget(
                     notification,
                     self.notification_control.as_ref(),
@@ -1092,8 +1089,8 @@ impl PrimarySurface {
 
         let root = gtk::CenterBox::new();
         root.add_css_class("bar-root");
-        root.set_margin_start(12);
-        root.set_margin_end(12);
+        root.set_margin_start(0);
+        root.set_margin_end(0);
         root.set_size_request(-1, BAR_HEIGHT);
 
         let left = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -1210,7 +1207,7 @@ impl PrimarySurface {
 
         let context_morph = MorphBin::new();
         context_morph.set_follow(true, false);
-        context_morph.set_radius(12.0);
+        context_morph.set_radius(0.0);
         context_morph.set_child(Some(&context_stack));
         center_slot.append(&context_morph);
 
@@ -1601,8 +1598,8 @@ impl ReducedSurface {
         let root = gtk::Grid::new();
         root.add_css_class("bar-root");
         root.set_column_spacing(12);
-        root.set_margin_start(12);
-        root.set_margin_end(12);
+        root.set_margin_start(0);
+        root.set_margin_end(0);
         root.set_size_request(-1, BAR_HEIGHT);
 
         let left = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -3042,8 +3039,8 @@ mod tests {
     }
 
     #[test]
-    fn bar_window_width_matches_monitor_width_minus_layer_margins() {
-        assert_eq!(super::bar_window_width_for_monitor_width(3_840), 3_830);
+    fn bar_window_spans_the_monitor() {
+        assert_eq!(super::bar_window_width_for_monitor_width(3_840), 3_840);
         assert_eq!(super::bar_window_width_for_monitor_width(1), 1);
     }
 
