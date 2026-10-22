@@ -514,6 +514,10 @@ pub struct ContextActionSpec {
     pub icon_name: String,
     pub accessory: Option<String>,
     pub action: ContextAction,
+    /// Set for 0–100 level actions; clients show a slider at this value and
+    /// send the action with the chosen percent instead of fixed steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -418,26 +418,20 @@ fn audio_snapshot(snapshot: &BarSnapshot) -> ContextSnapshot {
             None,
             ContextAction::ToggleMute,
         ));
-        for (title, percent, icon) in [
-            (
-                "Lower volume",
-                volume.saturating_sub(5),
-                "audio-volume-low-symbolic",
-            ),
-            (
-                "Raise volume",
-                volume.saturating_add(5).min(100),
-                "audio-volume-high-symbolic",
-            ),
-        ] {
-            actions.push(action(
-                title,
-                format!("Set volume to {percent}%"),
-                icon,
-                Some(format!("{percent}%")),
-                ContextAction::SetVolumePercent { percent },
-            ));
-        }
+        actions.push(ContextActionSpec {
+            level: Some(volume.min(100)),
+            ..action(
+                "Volume",
+                "Drag or use ← → to adjust",
+                if state.muted {
+                    "audio-volume-muted-symbolic"
+                } else {
+                    "audio-volume-high-symbolic"
+                },
+                Some(format!("{volume}%")),
+                ContextAction::SetVolumePercent { percent: volume },
+            )
+        });
     }
     for output in &state.outputs {
         if !output.is_default {
@@ -680,6 +674,7 @@ fn action(
         icon_name: icon_name.into(),
         accessory,
         action,
+        level: None,
     }
 }
 
@@ -805,6 +800,22 @@ mod tests {
                 .actions
                 .iter()
                 .any(|action| action.title == "Mute audio")
+        );
+        let volume = context
+            .actions
+            .iter()
+            .find(|action| action.level.is_some())
+            .expect("volume level");
+        assert_eq!(volume.level, Some(42));
+        assert_eq!(
+            volume.action,
+            ContextAction::SetVolumePercent { percent: 42 }
+        );
+        assert!(
+            !context
+                .actions
+                .iter()
+                .any(|action| action.title.contains("volume") && action.level.is_none())
         );
     }
 
