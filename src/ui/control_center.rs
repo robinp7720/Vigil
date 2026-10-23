@@ -1075,7 +1075,6 @@ impl NavigationUi {
     }
 
     fn render_error(&self) {
-        self.error_slot.remove_css_class("is-success");
         if let Some(message) = self.errors.borrow().message(self.page.get()) {
             self.error_label.set_label(message);
             self.error_slot.set_visible(true);
@@ -1114,21 +1113,6 @@ impl NavigationUi {
         }
         drop(pending);
         self.render_error();
-    }
-
-    fn flash_success(&self) {
-        self.error_label.set_label("Change applied");
-        self.error_slot.set_visible(true);
-        self.error_slot.remove_css_class("has-error");
-        self.error_slot.remove_css_class("is-pending");
-        self.error_slot.add_css_class("is-success");
-        let slot = self.error_slot.clone();
-        glib::timeout_add_local_once(Duration::from_millis(900), move || {
-            if slot.has_css_class("is-success") {
-                slot.remove_css_class("is-success");
-                slot.set_visible(false);
-            }
-        });
     }
 }
 
@@ -2798,7 +2782,6 @@ impl ControlCenterView {
         let Some(focus) = focus_from_origin(&completion.origin) else {
             return false;
         };
-        let completed = matches!(completion.result, ActionResult::Completed);
         match &completion.result {
             ActionResult::Completed => self.errors.borrow_mut().retry(focus),
             ActionResult::Failed { detail, .. } => {
@@ -2809,9 +2792,6 @@ impl ControlCenterView {
             }
         }
         self.navigation.finish_action(focus);
-        if completed {
-            self.navigation.flash_success();
-        }
         true
     }
 }
