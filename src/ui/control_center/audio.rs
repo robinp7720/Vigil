@@ -358,7 +358,16 @@ pub(super) fn media_card(
     artwork.add_css_class("media-artwork");
     artwork.set_content_fit(gtk::ContentFit::Cover);
     artwork.set_can_shrink(true);
-    root.set_child(Some(&artwork));
+    // Size the card independently of the image's intrinsic aspect ratio.
+    // Artwork is a non-measuring overlay, cropped to the compact card bounds.
+    let canvas = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    canvas.set_size_request(-1, 140);
+    root.set_child(Some(&canvas));
+    artwork.set_halign(gtk::Align::Fill);
+    artwork.set_valign(gtk::Align::Fill);
+    root.add_overlay(&artwork);
+    root.set_measure_overlay(&artwork, false);
+    root.set_clip_overlay(&artwork, true);
 
     let placeholder = gtk::Image::from_icon_name("audio-x-generic-symbolic");
     placeholder.add_css_class("media-artwork-placeholder");
