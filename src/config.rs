@@ -23,6 +23,7 @@ pub struct AppConfig {
     pub retry_backoff: RetryBackoffConfig,
     pub command_activity: CommandActivityConfig,
     pub experience: ExperienceConfig,
+    pub style: StyleConfig,
     pub routines: RoutineConfig,
     pub notifications: NotificationConfig,
 }
@@ -38,6 +39,7 @@ impl Default for AppConfig {
             retry_backoff: RetryBackoffConfig::default(),
             command_activity: CommandActivityConfig::default(),
             experience: ExperienceConfig::default(),
+            style: StyleConfig::default(),
             routines: RoutineConfig::default(),
             notifications: NotificationConfig::default(),
         }
@@ -173,6 +175,22 @@ impl AppConfig {
             self.notifications.preview_seconds,
         )?;
 
+        for (name, value) in [
+            ("surface_margin", self.style.surface_margin),
+            ("bar_padding", self.style.bar_padding),
+            ("panel_margin", self.style.panel_margin),
+            ("panel_bottom_margin", self.style.panel_bottom_margin),
+            ("panel_radius", self.style.panel_radius),
+            ("card_radius", self.style.card_radius),
+            ("context_radius", self.style.context_radius),
+        ] {
+            if !(0..=256).contains(&value) {
+                return Err(ConfigError::Validation(format!(
+                    "style.{name} must be between 0 and 256"
+                ))
+                .into());
+            }
+        }
         Ok(())
     }
 
@@ -196,6 +214,9 @@ pub enum ReloadStatus {
 pub fn reload_runtime_config(current: &AppConfig, next: AppConfig) -> RuntimeConfigReload {
     let mut reasons = Vec::new();
 
+    if current.style != next.style {
+        reasons.push("style geometry changes require restart".to_string());
+    }
     if current.freshness != next.freshness {
         reasons.push("freshness changes require restart".to_string());
     }
@@ -218,6 +239,35 @@ pub fn reload_runtime_config(current: &AppConfig, next: AppConfig) -> RuntimeCon
         RuntimeConfigReload {
             config: current.clone(),
             status: ReloadStatus::RestartRequired { reasons },
+        }
+    }
+}
+
+/// Native geometry cannot be changed by GTK CSS. Changes require a restart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StyleConfig {
+    pub surface_margin: i32,
+    pub bar_padding: i32,
+    pub panel_margin: i32,
+    pub panel_bottom_margin: i32,
+    pub panel_radius: i32,
+    pub card_radius: i32,
+    pub context_radius: i32,
+    pub shadows: bool,
+}
+
+impl Default for StyleConfig {
+    fn default() -> Self {
+        Self {
+            surface_margin: 5,
+            bar_padding: 12,
+            panel_margin: 28,
+            panel_bottom_margin: 32,
+            panel_radius: 18,
+            card_radius: 14,
+            context_radius: 12,
+            shadows: true,
         }
     }
 }
@@ -519,6 +569,27 @@ mod tests {
         AmbientMotion, AppConfig, ModuleName, MotionStyle, ReloadStatus, RoutineContextDetail,
         reload_runtime_config,
     };
+
+    #[test]
+    fn native_style_defaults_and_user_geometry_are_validated() {
+        let default = AppConfig::from_toml("").unwrap();
+        assert_eq!(default.style.surface_margin, 5);
+        assert_eq!(default.style.panel_radius, 18);
+        assert!(default.style.shadows);
+        let attached =
+            AppConfig::from_toml("[style]\nsurface_margin = 0\npanel_radius = 0\nshadows = false")
+                .unwrap();
+        assert_eq!(attached.style.surface_margin, 0);
+        assert!(!attached.style.shadows);
+        assert!(AppConfig::from_toml("[style]\npanel_radius = -1").is_err());
+        assert!(AppConfig::from_toml("[style]\nsurface_margin = 257").is_err());
+        let reload = super::reload_runtime_config(&default, attached);
+        assert!(matches!(
+            reload.status,
+            ReloadStatus::RestartRequired { .. }
+        ));
+        assert_eq!(reload.config.style, default.style);
+    }
 
     #[test]
     fn defaults_match_the_approved_urgency_policy() {

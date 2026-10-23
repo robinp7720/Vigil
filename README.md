@@ -205,3 +205,27 @@ Vigil imports existing timers from
 file does not exist.
 
 Hyprland integration uses the native Lua IPC API (Hyprland 0.55+ with a Lua configuration).
+
+## User styling
+
+Vigil reads `style.css` and optional `colors.css` beside its configuration (with
+fallback to `${XDG_CONFIG_HOME:-~/.config}/vigil`). Send SIGHUP to reload CSS.
+Native clipping and layer-shell geometry use a `[style]` table in `config.toml`:
+
+```toml
+[style]
+surface_margin = 5
+bar_padding = 12
+panel_margin = 28
+panel_bottom_margin = 32
+panel_radius = 18
+card_radius = 14
+context_radius = 12
+shadows = true
+```
+
+These are the original floating, rounded defaults. Dimensions accept integers
+from 0 to 256. Set dimensions to zero and `shadows = false` for an attached,
+square shell, and match the CSS radii and fills. Restart Vigil for native
+geometry changes; SIGHUP reports that a restart is required without partially
+applying geometry.

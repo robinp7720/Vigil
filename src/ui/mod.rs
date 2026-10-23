@@ -88,6 +88,7 @@ struct UiControlRequest {
 
 impl BarApplication {
     pub fn new(config: AppConfig, config_path: &Path) -> Result<Self> {
+        stage::configure(config.style);
         install_sighup_handler()?;
         let (ui_runtime, runtime) = start_runtime(config, config_path)?;
         let application = gtk::Application::builder()
@@ -130,6 +131,7 @@ impl BarApplication {
 
 pub fn run_preview(config_path: &Path, scenario: &str) -> Result<()> {
     let config = AppConfig::load(config_path)?;
+    stage::configure(config.style);
     let application = gtk::Application::builder()
         .application_id("me.robindecker.Vigil.Preview")
         .build();

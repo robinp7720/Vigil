@@ -25,7 +25,7 @@ use super::artwork::{
     ArtworkRequest, prefer_artwork_candidate, result_is_current, spawn_artwork_loader,
 };
 use super::morph::MorphRect;
-use super::morph_bin::{MorphBin, MorphOrigin};
+use super::morph_bin::{MorphBin, MorphOrigin, MorphShadow};
 use super::stage;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1761,7 +1761,7 @@ impl ControlCenterView {
         stack.set_transition_type(gtk::StackTransitionType::None);
         let page_morph = MorphBin::new();
         page_morph.set_follow(false, true);
-        page_morph.set_radius(stage::CARD_RADIUS);
+        page_morph.set_radius(stage::style().card_radius as f32);
         page_morph.set_child(Some(&stack));
         stack.set_hhomogeneous(true);
         stack.set_vhomogeneous(false);
@@ -2068,11 +2068,15 @@ impl ControlCenterView {
         panel_morph.set_halign(gtk::Align::End);
         panel_morph.set_valign(gtk::Align::Start);
         panel_morph.set_margin_top(stage::panel_top_in_stage());
-        panel_morph.set_margin_start(stage::PANEL_STAGE_MARGIN_X);
-        panel_morph.set_margin_end(stage::PANEL_STAGE_MARGIN_X);
-        panel_morph.set_margin_bottom(0);
-        panel_morph.set_radius(stage::CONTROL_CENTER_RADIUS);
-        panel_morph.set_shadow(None);
+        panel_morph.set_margin_start(stage::style().panel_margin);
+        panel_morph.set_margin_end(stage::style().panel_margin);
+        panel_morph.set_margin_bottom(stage::style().panel_bottom_margin);
+        panel_morph.set_radius(stage::style().panel_radius as f32);
+        panel_morph.set_shadow(stage::style().shadows.then_some(MorphShadow {
+            dy: 18.0,
+            blur: 48.0,
+            alpha: 0.44,
+        }));
 
         // Bound the panel on shorter outputs without clipping its footer or input shape.
         let panel_scroll = gtk::ScrolledWindow::new();
@@ -2459,10 +2463,10 @@ impl ControlCenterView {
         let panel_width = if allocated_panel_width > 0 {
             allocated_panel_width
         } else {
-            (measured_outer_width - stage::PANEL_STAGE_MARGIN_X * 2).max(480)
+            (measured_outer_width - stage::style().panel_margin * 2).max(480)
         };
         let stage_panel_width =
-            measured_outer_width.max(panel_width + stage::PANEL_STAGE_MARGIN_X * 2);
+            measured_outer_width.max(panel_width + stage::style().panel_margin * 2);
         let needed = stage::control_center_stage_width(stage_panel_width, origin, monitor_width);
         let visible = self.window.is_visible();
         let current_request = self.stage_box.width_request();
@@ -5884,7 +5888,7 @@ mod tests {
         let button = MorphRect::new(2300.0, 9.0, 30.0, 28.0);
         assert_eq!(
             panel_origin(Some(button), 2560, 480),
-            MorphOrigin::Local(MorphRect::new(220.0, -35.0, 30.0, 28.0))
+            MorphOrigin::Local(MorphRect::new(253.0, -45.0, 30.0, 28.0))
         );
         assert_eq!(panel_origin(None, 2560, 480), MorphOrigin::Scaled(0.92));
     }

@@ -97,3 +97,15 @@ prefixes = ["pytest"]
 [[command_activity.allowlist]]
 label = "Make"
 prefixes = ["make"]
+
+# Native geometry defaults. CSS remains user-defined in style.css.
+# Restart Vigil after editing these values.
+[style]
+surface_margin = 5
+bar_padding = 12
+panel_margin = 28
+panel_bottom_margin = 32
+panel_radius = 18
+card_radius = 14
+context_radius = 12
+shadows = true

@@ -26,9 +26,9 @@ use super::control_center::{
     ControlCenterFocus, ControlCenterView, NotificationPresentation, notification_row,
 };
 use super::morph::{self, MorphRect};
-use super::morph_bin::{MorphBin, MorphOrigin};
+use super::morph_bin::{MorphBin, MorphOrigin, MorphShadow};
 use super::popovers::PopoverCoordinator;
-use super::stage::{self, BAR_HEIGHT, SURFACE_MARGIN};
+use super::stage::{self, BAR_HEIGHT};
 use super::system::{SystemButtonSpec, SystemCluster, SystemModuleId, build_system_cluster};
 use super::wm::{WindowGroupSpec, select_primary_output, title_for_output, window_groups};
 use super::workspace_pill::WorkspacePill;
@@ -538,8 +538,12 @@ impl SurfaceRegistry {
                 let morph = MorphBin::new();
                 morph.set_follow(false, true);
                 morph.set_start_collapsed(animate);
-                morph.set_radius(stage::CARD_RADIUS);
-                morph.set_shadow(None);
+                morph.set_radius(stage::style().card_radius as f32);
+                morph.set_shadow(stage::style().shadows.then_some(MorphShadow {
+                    dy: 8.0,
+                    blur: 24.0,
+                    alpha: 0.30,
+                }));
 
                 morph.set_child(Some(&toast_widget(
                     notification,
@@ -856,8 +860,8 @@ fn new_notification_stack(
     // the island within it, and the input region covers only the cards below the bar.
     window.set_anchor(Edge::Top, true);
     window.set_anchor(Edge::Bottom, true);
-    window.set_margin(Edge::Top, SURFACE_MARGIN);
-    window.set_margin(Edge::Bottom, SURFACE_MARGIN);
+    window.set_margin(Edge::Top, stage::style().surface_margin);
+    window.set_margin(Edge::Bottom, stage::style().surface_margin);
     window.set_exclusive_zone(-1);
     window.set_monitor(Some(monitor));
     let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
@@ -1089,8 +1093,8 @@ impl PrimarySurface {
 
         let root = gtk::CenterBox::new();
         root.add_css_class("bar-root");
-        root.set_margin_start(0);
-        root.set_margin_end(0);
+        root.set_margin_start(stage::style().bar_padding);
+        root.set_margin_end(stage::style().bar_padding);
         root.set_size_request(-1, BAR_HEIGHT);
 
         let left = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -1207,7 +1211,7 @@ impl PrimarySurface {
 
         let context_morph = MorphBin::new();
         context_morph.set_follow(true, false);
-        context_morph.set_radius(0.0);
+        context_morph.set_radius(stage::style().context_radius as f32);
         context_morph.set_child(Some(&context_stack));
         center_slot.append(&context_morph);
 
@@ -1224,8 +1228,8 @@ impl PrimarySurface {
             application,
             monitor,
             &spec.output_name,
-            SURFACE_MARGIN,
-            SURFACE_MARGIN,
+            stage::style().surface_margin,
+            stage::style().surface_margin,
             initial_system.control_center(),
             action_sender.clone(),
             calendar_sender,
@@ -1598,8 +1602,8 @@ impl ReducedSurface {
         let root = gtk::Grid::new();
         root.add_css_class("bar-root");
         root.set_column_spacing(12);
-        root.set_margin_start(0);
-        root.set_margin_end(0);
+        root.set_margin_start(stage::style().bar_padding);
+        root.set_margin_end(stage::style().bar_padding);
         root.set_size_request(-1, BAR_HEIGHT);
 
         let left = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -1740,15 +1744,17 @@ fn base_window(application: &gtk::Application, monitor: &gdk::Monitor) -> gtk::A
     window.set_anchor(Edge::Left, true);
     window.set_anchor(Edge::Right, true);
     window.set_exclusive_zone(BAR_HEIGHT);
-    window.set_margin(Edge::Top, SURFACE_MARGIN);
-    window.set_margin(Edge::Left, SURFACE_MARGIN);
-    window.set_margin(Edge::Right, SURFACE_MARGIN);
+    window.set_margin(Edge::Top, stage::style().surface_margin);
+    window.set_margin(Edge::Left, stage::style().surface_margin);
+    window.set_margin(Edge::Right, stage::style().surface_margin);
     window.set_monitor(Some(monitor));
     window
 }
 
 fn bar_window_width_for_monitor_width(monitor_width: i32) -> i32 {
-    monitor_width.saturating_sub(SURFACE_MARGIN * 2).max(1)
+    monitor_width
+        .saturating_sub(stage::style().surface_margin * 2)
+        .max(1)
 }
 
 struct WorkspaceStrip {
@@ -3039,8 +3045,8 @@ mod tests {
     }
 
     #[test]
-    fn bar_window_spans_the_monitor() {
-        assert_eq!(super::bar_window_width_for_monitor_width(3_840), 3_840);
+    fn bar_window_width_respects_configured_margins() {
+        assert_eq!(super::bar_window_width_for_monitor_width(3_840), 3_830);
         assert_eq!(super::bar_window_width_for_monitor_width(1), 1);
     }
 
