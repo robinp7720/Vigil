@@ -453,6 +453,12 @@ impl SurfaceRegistry {
         }
     }
 
+    pub fn clear_routine_history(&self) -> anyhow::Result<()> {
+        self.suggestions.borrow_mut().clear_history()?;
+        self.context_dirty.set(true);
+        Ok(())
+    }
+
     pub fn take_context_dirty(&self) -> bool {
         self.context_dirty.replace(false)
     }

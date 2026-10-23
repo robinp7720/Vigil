@@ -105,7 +105,8 @@ pub fn run_test_control_server(requests: usize) -> Result<()> {
             ControlRequest::ActivityStart { .. } | ControlRequest::ActivityFinish { .. } => {
                 Ok(ControlResponse::Accepted)
             }
-            ControlRequest::ContextGet { .. }
+            ControlRequest::RoutinesClear
+            | ControlRequest::ContextGet { .. }
             | ControlRequest::ContextExecute { .. }
             | ControlRequest::ControlCenterOpen { .. }
             | ControlRequest::ControlCenterToggle { .. }

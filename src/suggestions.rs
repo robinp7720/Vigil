@@ -53,8 +53,6 @@ struct PersistedSuggestionState {
     observations: Vec<RoutineObservation>,
     #[serde(default)]
     feedback: BTreeMap<String, RoutineFeedback>,
-    #[serde(default = "default_learning_enabled")]
-    learning_enabled: bool,
 }
 
 impl Default for PersistedSuggestionState {
@@ -63,7 +61,6 @@ impl Default for PersistedSuggestionState {
             version: STATE_VERSION,
             observations: Vec::new(),
             feedback: BTreeMap::new(),
-            learning_enabled: true,
         }
     }
 }
@@ -186,10 +183,7 @@ impl SuggestionEngine {
         } else {
             Vec::new()
         };
-        if config.experience.suggestions
-            && config.routines.enabled
-            && self.persisted.learning_enabled
-        {
+        if config.experience.suggestions && config.routines.enabled {
             suggestions.extend(self.routine_suggestions(snapshot, &config.routines, now_epoch));
         }
 
@@ -242,7 +236,7 @@ impl SuggestionEngine {
         config: &RoutineConfig,
         now_epoch: i64,
     ) -> bool {
-        if !config.enabled || !self.persisted.learning_enabled || !routine_action_allowed(action) {
+        if !config.enabled || !routine_action_allowed(action) {
             return false;
         }
 
@@ -288,29 +282,19 @@ impl SuggestionEngine {
         true
     }
 
-    pub fn clear_history(&mut self) {
-        let learning_enabled = self.persisted.learning_enabled;
-        self.persisted = PersistedSuggestionState {
-            version: STATE_VERSION,
-            learning_enabled,
-            ..PersistedSuggestionState::default()
-        };
+    pub fn clear_history(&mut self) -> Result<()> {
+        let previous = std::mem::take(&mut self.persisted);
+        if let Err(error) = self.persist() {
+            self.persisted = previous;
+            return Err(error);
+        }
         self.visible
             .retain(|_, suggestion| !matches!(suggestion.source, SuggestionSource::Routine));
-        self.persist_or_warn();
+        Ok(())
     }
 
     pub fn observation_count(&self) -> usize {
         self.persisted.observations.len()
-    }
-
-    pub fn learning_enabled(&self) -> bool {
-        self.persisted.learning_enabled
-    }
-
-    pub fn set_learning_enabled(&mut self, enabled: bool) {
-        self.persisted.learning_enabled = enabled;
-        self.persist_or_warn();
     }
 
     fn routine_suggestions(
@@ -480,10 +464,6 @@ impl SuggestionEngine {
 
 fn state_version() -> u8 {
     STATE_VERSION
-}
-
-fn default_learning_enabled() -> bool {
-    true
 }
 
 fn suggestion_state_path() -> Result<PathBuf> {
@@ -1204,6 +1184,117 @@ mod tests {
         fs::write(&path, b"{not-json").unwrap();
         let recovered = SuggestionEngine::load_at(path).unwrap();
         assert_eq!(recovered.observation_count(), 0);
+    }
+
+    #[test]
+    fn config_controls_learning_and_legacy_flags_do_not_override_it() {
+        for old_enabled in [false, true] {
+            let root = temp_dir("legacy-learning");
+            fs::create_dir_all(&root).unwrap();
+            let path = root.join("routines.json");
+            let mut engine = SuggestionEngine::load_at(path.clone()).unwrap();
+            let mut config = AppConfig::default();
+            config.routines.context = RoutineContextDetail::TimingOnly;
+            let snapshot = BarSnapshot::default();
+            for day in 0..3 {
+                assert!(engine.record_success(
+                    "test",
+                    &ActionIntent::OpenCalendar,
+                    &snapshot,
+                    &config.routines,
+                    1_800_000_000 + day * 86400
+                ));
+            }
+            let mut json: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            json["learning_enabled"] = old_enabled.into();
+            fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+            let mut engine = SuggestionEngine::load_at(path).unwrap();
+            let now = 1_800_000_000 + 3 * 86400;
+            assert!(
+                engine
+                    .suggestions(&snapshot, &config, now)
+                    .iter()
+                    .any(|s| s.source == SuggestionSource::Routine)
+            );
+            config.routines.enabled = false;
+            assert!(!engine.record_success(
+                "test",
+                &ActionIntent::OpenCalendar,
+                &snapshot,
+                &config.routines,
+                now
+            ));
+            assert!(
+                !engine
+                    .suggestions(&snapshot, &config, now)
+                    .iter()
+                    .any(|s| s.source == SuggestionSource::Routine)
+            );
+            assert_eq!(engine.observation_count(), 3);
+            config.routines.enabled = true;
+            let suggestions = engine.suggestions(&snapshot, &config, now);
+            let routine = suggestions
+                .iter()
+                .find(|s| s.source == SuggestionSource::Routine)
+                .unwrap();
+            engine.dismiss(&routine.id, now);
+            assert!(!engine.persisted.feedback.is_empty());
+            engine.clear_history().unwrap();
+            engine.clear_history().unwrap();
+            assert_eq!(engine.observation_count(), 0);
+            assert!(engine.persisted.feedback.is_empty());
+            assert!(
+                !engine
+                    .visible
+                    .values()
+                    .any(|s| s.source == SuggestionSource::Routine)
+            );
+            let loaded = SuggestionEngine::load_at(root.join("routines.json")).unwrap();
+            assert_eq!(loaded.observation_count(), 0);
+            assert!(loaded.persisted.feedback.is_empty());
+            assert!(engine.record_success(
+                "test",
+                &ActionIntent::OpenCalendar,
+                &snapshot,
+                &config.routines,
+                now
+            ));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn failed_clear_preserves_history_and_live_suggestions() {
+        let root = temp_dir("clear-failure");
+        fs::create_dir_all(&root).unwrap();
+        let mut engine = SuggestionEngine::default();
+        let mut snapshot = BarSnapshot::default();
+        snapshot.system.calendar = Some(CalendarEvent {
+            title: "Meeting".into(),
+            start_epoch: 1_800_000_300,
+            ..CalendarEvent::default()
+        });
+        let config = AppConfig::default();
+        engine.record_success(
+            "test",
+            &ActionIntent::OpenCalendar,
+            &snapshot,
+            &config.routines,
+            1_800_000_000,
+        );
+        let live = engine.suggestions(&snapshot, &config, 1_800_000_000);
+        assert!(!live.is_empty());
+        let blocker = root.join("not-a-directory");
+        fs::write(&blocker, b"block").unwrap();
+        engine.state_path = Some(blocker.join("routines.json"));
+        assert!(engine.clear_history().is_err());
+        assert_eq!(engine.observation_count(), 1);
+        assert_eq!(engine.visible.len(), live.len());
+        engine.state_path = Some(root.join("routines.json"));
+        engine.clear_history().unwrap();
+        assert_eq!(engine.visible.len(), live.len());
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn temp_dir(label: &str) -> PathBuf {

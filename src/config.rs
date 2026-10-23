@@ -649,6 +649,7 @@ mod tests {
         next.modules.reduced = vec![ModuleName::Workspaces, ModuleName::Clock];
         next.experience.motion = MotionStyle::Calm;
         next.routines.retention_days = 14;
+        next.routines.enabled = false;
 
         let reloaded = reload_runtime_config(&current, next.clone());
 

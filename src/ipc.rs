@@ -33,6 +33,8 @@ pub enum ControlRequest {
         id: String,
     },
     TimerList,
+    /// Clear locally learned routine observations and feedback.
+    RoutinesClear,
     ActivityStart {
         id: String,
         label: String,
@@ -513,6 +515,28 @@ mod tests {
 
         assert_eq!(response, ControlResponse::Timers { timers: Vec::new() });
         assert_eq!(socket_path, runtime_dir.path().join("vigil.sock"));
+    }
+
+    #[test]
+    fn routine_clear_roundtrips_over_control_socket() {
+        let runtime_dir = TempDir::new("ipc-routines");
+        let socket = ControlSocket::bind_at(runtime_dir.path().join("vigil.sock")).unwrap();
+        let path = socket.local_path().to_path_buf();
+        let server = thread::spawn(move || {
+            socket
+                .serve_once(|incoming| {
+                    assert_eq!(incoming, ControlRequest::RoutinesClear);
+                    Ok(ControlResponse::Accepted)
+                })
+                .unwrap();
+        });
+        assert_eq!(
+            ControlClient::with_path(path)
+                .send(&ControlRequest::RoutinesClear)
+                .unwrap(),
+            ControlResponse::Accepted
+        );
+        server.join().unwrap();
     }
 
     #[test]

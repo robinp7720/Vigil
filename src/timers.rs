@@ -136,6 +136,7 @@ impl TimerStore {
             ControlRequest::TimerList => {}
             ControlRequest::ActivityStart { .. }
             | ControlRequest::ActivityFinish { .. }
+            | ControlRequest::RoutinesClear
             | ControlRequest::ContextGet { .. }
             | ControlRequest::ContextExecute { .. }
             | ControlRequest::ControlCenterOpen { .. }

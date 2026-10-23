@@ -190,7 +190,10 @@ pub fn run_preview(config_path: &Path, scenario: &str) -> Result<()> {
         let (action_tx, _action_rx) = mpsc::channel();
         let mut surfaces = SurfaceRegistry::with_suggestion_engine(None, suggestion_engine);
         surfaces.reconcile(application, &snapshot, &preview_config, &action_tx);
-        if scenario == "control-center" {
+        if matches!(
+            scenario.as_str(),
+            "control-center" | "suggestion" | "routine"
+        ) {
             surfaces.open_control_center(crate::DesktopContext::Overview, Some(&primary));
         }
         if scenario == "power" {
@@ -983,7 +986,8 @@ fn handle_control_request(
                 .set_dnd(enabled)?;
             Ok(ControlResponse::Accepted)
         }
-        request @ (ControlRequest::ContextGet { .. }
+        request @ (ControlRequest::RoutinesClear
+        | ControlRequest::ContextGet { .. }
         | ControlRequest::ContextExecute { .. }
         | ControlRequest::ControlCenterOpen { .. }
         | ControlRequest::ControlCenterToggle { .. }
@@ -1054,6 +1058,15 @@ fn drain_control_requests(runtime: &mut UiRuntime) {
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
         };
         match request.request {
+            ControlRequest::RoutinesClear => {
+                let response = match runtime.registry.clear_routine_history() {
+                    Ok(()) => ControlResponse::Accepted,
+                    Err(error) => ControlResponse::Error {
+                        message: format!("failed to clear routine history: {error:#}"),
+                    },
+                };
+                let _ = request.response_tx.send(response);
+            }
             ControlRequest::ContextGet { context } => {
                 let contexts = context_snapshots(runtime.store.snapshot(), context);
                 let _ = request

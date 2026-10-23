@@ -1625,7 +1625,7 @@ pub struct ControlCenterView {
     suggestion_list: gtk::Box,
     suggestion_specs: RefCell<Vec<Suggestion>>,
     suggestion_rows: RefCell<BTreeMap<String, gtk::Box>>,
-    routine_learning: gtk::Switch,
+    suggestion_section: gtk::Box,
     suggestion_engine: Rc<RefCell<SuggestionEngine>>,
     suggestion_dirty: Rc<Cell<bool>>,
     network_tile: ToggleTile,
@@ -1812,26 +1812,11 @@ impl ControlCenterView {
         overview.add_css_class("control-page");
         let suggestion_section = gtk::Box::new(gtk::Orientation::Vertical, 7);
         suggestion_section.add_css_class("suggestion-section");
-        suggestion_section.set_visible(true);
+        suggestion_section.set_visible(false);
         suggestion_section.append(&section_eyebrow("SUGGESTED NOW"));
         let suggestion_list = gtk::Box::new(gtk::Orientation::Vertical, 7);
         suggestion_list.add_css_class("suggestion-list");
         suggestion_section.append(&suggestion_list);
-        let routine_controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        routine_controls.add_css_class("routine-controls");
-        let routine_label = gtk::Label::new(Some("Learn local routines"));
-        routine_label.set_xalign(0.0);
-        routine_label.set_hexpand(true);
-        let routine_learning = gtk::Switch::new();
-        routine_learning.set_valign(gtk::Align::Center);
-        routine_learning.set_active(suggestion_engine.borrow().learning_enabled());
-        let clear_routines = gtk::Button::with_label("Clear");
-        clear_routines.add_css_class("compact-action");
-        clear_routines.set_tooltip_text(Some("Clear all locally learned routine data"));
-        routine_controls.append(&routine_label);
-        routine_controls.append(&routine_learning);
-        routine_controls.append(&clear_routines);
-        suggestion_section.append(&routine_controls);
         overview.append(&suggestion_section);
         let quick_grid = gtk::Grid::new();
         quick_grid.add_css_class("control-grid");
@@ -2118,24 +2103,6 @@ impl ControlCenterView {
         let motion = Rc::new(ControlCenterMotion::new(&window, &root, &panel_morph));
 
         {
-            let suggestion_engine = suggestion_engine.clone();
-            let suggestion_dirty = suggestion_dirty.clone();
-            routine_learning.connect_active_notify(move |switch| {
-                suggestion_engine
-                    .borrow_mut()
-                    .set_learning_enabled(switch.is_active());
-                suggestion_dirty.set(true);
-            });
-        }
-        {
-            let suggestion_engine = suggestion_engine.clone();
-            let suggestion_dirty = suggestion_dirty.clone();
-            clear_routines.connect_clicked(move |_| {
-                suggestion_engine.borrow_mut().clear_history();
-                suggestion_dirty.set(true);
-            });
-        }
-        {
             let notification_control = notification_control.clone();
             let suppress_controls = suppress_controls.clone();
             notification_dnd.connect_active_notify(move |switch| {
@@ -2369,7 +2336,7 @@ impl ControlCenterView {
             suggestion_list,
             suggestion_specs: RefCell::new(Vec::new()),
             suggestion_rows: RefCell::new(BTreeMap::new()),
-            routine_learning,
+            suggestion_section,
             suggestion_engine,
             suggestion_dirty,
             network_tile,
@@ -2736,8 +2703,7 @@ impl ControlCenterView {
     }
 
     pub fn update_suggestions(&self, suggestions: &[Suggestion]) {
-        self.routine_learning
-            .set_active(self.suggestion_engine.borrow().learning_enabled());
+        self.suggestion_section.set_visible(!suggestions.is_empty());
         if self.suggestion_specs.borrow().as_slice() == suggestions {
             return;
         }

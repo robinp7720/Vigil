@@ -172,13 +172,25 @@ setting disables transforms and looping effects.
 
 The center island may offer one explicit action when live state suggests a
 useful next step. Vigil never executes a suggestion automatically. The control
-center shows up to three suggestions with their reasons and provides controls
-to pause or clear local routine learning.
+center shows up to three suggestions with their reasons, actions, and dismissal.
+The section is hidden when no suggestions are available.
 
 Successful discrete actions can become routine suggestions after three
 matching occurrences on distinct days. Routine observations are stored
 user-only at `${XDG_STATE_HOME:-~/.local/state}/vigil/routines.json`, expire
 after 30 days by default, and never leave the machine.
+
+Routine learning is configured only through `[routines] enabled` in
+`~/.config/vigil/config.toml` (default: `true`). Setting it to `false` stops
+recording and routine suggestions without deleting existing history. Reload
+with `systemctl --user kill --signal=HUP vigil.service`. The former UI pause
+flag is ignored; the config now determines whether learning is enabled.
+
+Run `vigil routines clear` to erase routine observations and dismissal feedback.
+This requires the running Vigil service and updates both disk and the UI.
+It does not change configuration: if learning is enabled, subsequent eligible
+actions begin a fresh history. A failed save returns an error.
+
 
 For deterministic visual review in a graphical Wayland session:
 

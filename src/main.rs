@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::{io::Write, path::Path};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
@@ -23,6 +23,11 @@ enum Command {
     Timer {
         #[command(subcommand)]
         command: TimerCommand,
+    },
+    /// Manage locally learned routines (requires the running Vigil service).
+    Routines {
+        #[command(subcommand)]
+        command: RoutinesCommand,
     },
     Activity {
         #[command(subcommand)]
@@ -81,6 +86,12 @@ enum TimerCommand {
         id: String,
     },
     List,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum RoutinesCommand {
+    /// Erase learned history and feedback; enabled learning starts fresh.
+    Clear,
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -200,6 +211,14 @@ fn run_cli(cli: Cli) -> Result<()> {
                 LockscreenCommand::Snapshot => vigil::ControlRequest::LockscreenGet,
             };
             let response = vigil::ControlClient::new()?.send(&request)?;
+            handle_control_response(response)
+        }
+        Some(Command::Routines {
+            command: RoutinesCommand::Clear,
+        }) => {
+            let response = vigil::ControlClient::new()?
+                .send(&vigil::ControlRequest::RoutinesClear)
+                .context("routine cleanup requires the running Vigil service")?;
             handle_control_response(response)
         }
         Some(Command::ControlCenter { command }) => {
@@ -405,6 +424,24 @@ mod tests {
     use super::{
         ActivityCommand, activity_request, encode_activity_shell_rules, parse_desktop_context,
     };
+
+    #[test]
+    fn routines_clear_parses_and_errors_propagate() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from(["vigil", "routines", "clear"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(super::Command::Routines {
+                command: super::RoutinesCommand::Clear
+            })
+        ));
+        assert!(
+            super::handle_control_response(vigil::ControlResponse::Error {
+                message: "save failed".into()
+            })
+            .is_err()
+        );
+    }
 
     #[test]
     fn activity_start_request_uses_label_cwd_and_timestamp() {
