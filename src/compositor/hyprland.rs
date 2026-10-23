@@ -605,11 +605,12 @@ fn read_hyprctl_json<T>(command: &str) -> Result<T>
 where
     T: for<'de> Deserialize<'de>,
 {
-    let output = Command::new("hyprctl")
-        .arg("-j")
-        .arg(command)
-        .output()
-        .with_context(|| format!("failed to execute hyprctl -j {command}"))?;
+    let output = crate::process::output(
+        Command::new("hyprctl").arg("-j").arg(command),
+        crate::process::COMMAND_TIMEOUT,
+        None,
+    )
+    .with_context(|| format!("failed to execute hyprctl -j {command}"))?;
     if !output.status.success() {
         bail!(
             "hyprctl -j {command} failed: {}",
@@ -622,20 +623,21 @@ where
 }
 
 fn default_command_runner(program: &str, args: &[String], env: &CommandEnv) -> Result<()> {
-    let status = Command::new(program)
-        .args(args)
-        .envs(
+    let status = crate::process::output(
+        Command::new(program).args(args).envs(
             env.iter()
                 .map(|(key, value)| (key.as_str(), value.as_str())),
+        ),
+        crate::process::COMMAND_TIMEOUT,
+        None,
+    )
+    .with_context(|| {
+        format!(
+            "failed to execute compositor command: {program} {}",
+            args.join(" ")
         )
-        .status()
-        .with_context(|| {
-            format!(
-                "failed to execute compositor command: {program} {}",
-                args.join(" ")
-            )
-        })?;
-    if !status.success() {
+    })?;
+    if !status.status.success() {
         bail!("compositor command failed: {program} {}", args.join(" "));
     }
     Ok(())

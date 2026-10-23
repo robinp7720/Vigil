@@ -96,13 +96,13 @@ fn parse_pactl_outputs(info: &str, sinks: &str) -> Result<Vec<AudioOutputState>>
 /// Reads one wpctl node's volume percent and mute state, such as
 /// `@DEFAULT_AUDIO_SINK@` or `@DEFAULT_AUDIO_SOURCE@`.
 pub fn read_wpctl_level(node: &str) -> Result<(u8, bool)> {
-    let stdout = command_stdout("wpctl", ["get-volume", node])?;
+    let stdout = command_stdout("wpctl", ["get-volume", node], None)?;
     let state = parse_wpctl_volume(&stdout)?;
     Ok((state.volume_percent.unwrap_or_default(), state.muted))
 }
 
 fn publish_audio_snapshot(sender: &Sender<StateUpdate>, cancelled: &Arc<AtomicBool>) -> Result<()> {
-    let state = read_audio_state()?;
+    let state = read_audio_state(cancelled)?;
     if sender
         .send(StateUpdate::System(SystemUpdate::Audio(state)))
         .is_err()
@@ -112,11 +112,13 @@ fn publish_audio_snapshot(sender: &Sender<StateUpdate>, cancelled: &Arc<AtomicBo
     Ok(())
 }
 
-fn read_audio_state() -> Result<AudioState> {
-    let output = Command::new("wpctl")
-        .args(["get-volume", "@DEFAULT_AUDIO_SINK@"])
-        .output()
-        .context("failed to execute wpctl get-volume @DEFAULT_AUDIO_SINK@")?;
+fn read_audio_state(cancelled: &AtomicBool) -> Result<AudioState> {
+    let output = crate::process::output(
+        Command::new("wpctl").args(["get-volume", "@DEFAULT_AUDIO_SINK@"]),
+        crate::process::COMMAND_TIMEOUT,
+        Some(cancelled),
+    )
+    .context("failed to execute wpctl get-volume @DEFAULT_AUDIO_SINK@")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         bail!("wpctl get-volume failed: {stderr}");
@@ -124,17 +126,23 @@ fn read_audio_state() -> Result<AudioState> {
 
     let stdout = String::from_utf8(output.stdout).context("wpctl output was not UTF-8")?;
     let mut state = parse_wpctl_volume(&stdout)?;
-    let info = command_stdout("pactl", ["-f", "json", "info"])?;
-    let sinks = command_stdout("pactl", ["-f", "json", "list", "sinks"])?;
+    let info = command_stdout("pactl", ["-f", "json", "info"], Some(cancelled))?;
+    let sinks = command_stdout("pactl", ["-f", "json", "list", "sinks"], Some(cancelled))?;
     state.outputs = parse_pactl_outputs(&info, &sinks)?;
     Ok(state)
 }
 
-fn command_stdout<const N: usize>(program: &str, args: [&str; N]) -> Result<String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to execute {program}"))?;
+fn command_stdout<const N: usize>(
+    program: &str,
+    args: [&str; N],
+    cancelled: Option<&AtomicBool>,
+) -> Result<String> {
+    let output = crate::process::output(
+        Command::new(program).args(args),
+        crate::process::COMMAND_TIMEOUT,
+        cancelled,
+    )
+    .with_context(|| format!("failed to execute {program}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         bail!("{program} exited with {}: {stderr}", output.status);
@@ -202,10 +210,21 @@ fn audio_event_requires_refresh(line: &str) -> bool {
         .any(|kind| line.contains(kind))
 }
 
-fn run_audio_worker(sender: &Sender<StateUpdate>, cancelled: &Arc<AtomicBool>) -> Result<bool> {
-    publish_audio_snapshot(sender, cancelled)?;
+fn coalesce_audio_events(receiver: &mpsc::Receiver<Result<String>>) -> Result<()> {
+    for _ in 0..256 {
+        match receiver.try_recv() {
+            Ok(line) => {
+                line?;
+            }
+            Err(_) => break,
+        }
+    }
+    Ok(())
+}
 
+fn run_audio_worker(sender: &Sender<StateUpdate>, cancelled: &Arc<AtomicBool>) -> Result<bool> {
     let (mut child, receiver) = spawn_audio_bridge()?;
+    publish_audio_snapshot(sender, cancelled)?;
     loop {
         if cancelled.load(Ordering::Relaxed) {
             return Ok(false);
@@ -213,6 +232,9 @@ fn run_audio_worker(sender: &Sender<StateUpdate>, cancelled: &Arc<AtomicBool>) -
 
         match receiver.recv_timeout(AUDIO_EVENT_TIMEOUT) {
             Ok(Ok(line)) if audio_event_requires_refresh(&line) => {
+                // One refresh covers the pending burst. Bound draining so a busy
+                // server cannot prevent progress or cancellation.
+                coalesce_audio_events(&receiver)?;
                 publish_audio_snapshot(sender, cancelled)?
             }
             Ok(Ok(_)) => {}
@@ -254,6 +276,18 @@ pub fn spawn_audio_source(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn queued_audio_burst_is_coalesced_and_errors_preserved() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for _ in 0..100 {
+            tx.send(Ok("change on sink #1".to_owned())).unwrap();
+        }
+        super::coalesce_audio_events(&rx).unwrap();
+        assert!(rx.try_recv().is_err());
+        tx.send(Err(anyhow::anyhow!("bridge failed"))).unwrap();
+        assert!(super::coalesce_audio_events(&rx).is_err());
+    }
+
     use std::process::Command;
 
     use super::{

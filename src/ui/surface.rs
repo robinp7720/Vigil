@@ -394,13 +394,38 @@ struct NotificationStackHandle {
     output: String,
 }
 
+#[derive(Default)]
+pub(super) struct ContextDirty {
+    dirty: Rc<Cell<bool>>,
+    waker: RefCell<Option<Rc<dyn Fn()>>>,
+}
+
+impl ContextDirty {
+    pub(super) fn from_flag(dirty: Rc<Cell<bool>>) -> Self {
+        Self {
+            dirty,
+            waker: RefCell::new(None),
+        }
+    }
+
+    pub(super) fn set(&self, dirty: bool) {
+        self.dirty.set(dirty);
+        if dirty && let Some(waker) = self.waker.borrow().as_ref() {
+            waker();
+        }
+    }
+    fn replace(&self, dirty: bool) -> bool {
+        self.dirty.replace(dirty)
+    }
+}
+
 pub struct SurfaceRegistry {
     surfaces: BTreeMap<String, SurfaceHandle>,
     notification_stack: Option<NotificationStackHandle>,
     presentation_hidden: bool,
     calendar_sender: Option<Sender<CalendarMonthRequest>>,
     dismissals: Rc<RefCell<Dismissals>>,
-    context_dirty: Rc<Cell<bool>>,
+    context_dirty: Rc<ContextDirty>,
     suggestions: Rc<RefCell<SuggestionEngine>>,
     notification_control: Option<NotificationControl>,
 }
@@ -419,7 +444,7 @@ impl SurfaceRegistry {
             presentation_hidden: false,
             calendar_sender: None,
             dismissals: Rc::new(RefCell::new(Dismissals::default())),
-            context_dirty: Rc::new(Cell::new(false)),
+            context_dirty: Rc::new(ContextDirty::default()),
             suggestions: Rc::new(RefCell::new(SuggestionEngine::default())),
             notification_control: None,
         }
@@ -447,7 +472,7 @@ impl SurfaceRegistry {
             presentation_hidden: false,
             calendar_sender,
             dismissals: Rc::new(RefCell::new(Dismissals::default())),
-            context_dirty: Rc::new(Cell::new(false)),
+            context_dirty: Rc::new(ContextDirty::default()),
             suggestions: Rc::new(RefCell::new(suggestions)),
             notification_control,
         }
@@ -457,6 +482,10 @@ impl SurfaceRegistry {
         self.suggestions.borrow_mut().clear_history()?;
         self.context_dirty.set(true);
         Ok(())
+    }
+
+    pub(super) fn set_context_waker(&mut self, waker: Rc<dyn Fn()>) {
+        *self.context_dirty.waker.borrow_mut() = Some(waker);
     }
 
     pub fn take_context_dirty(&self) -> bool {
@@ -989,7 +1018,7 @@ struct SurfaceRuntime {
     action_sender: Sender<ActionRequest>,
     calendar_sender: Option<Sender<CalendarMonthRequest>>,
     dismissals: Rc<RefCell<Dismissals>>,
-    context_dirty: Rc<Cell<bool>>,
+    context_dirty: Rc<ContextDirty>,
     suggestions: Rc<RefCell<SuggestionEngine>>,
     notification_control: Option<NotificationControl>,
 }
@@ -1230,7 +1259,7 @@ impl PrimarySurface {
         system_box.append(&system_items);
 
         let initial_system = spec.system.as_ref().expect("primary system spec");
-        let control_center = Rc::new(ControlCenterView::new(
+        let control_center = Rc::new(ControlCenterView::new_with_waker(
             application,
             monitor,
             &spec.output_name,
@@ -2004,7 +2033,7 @@ fn install_context_interactions(
     current_context: Rc<RefCell<Option<ContextSpec>>>,
     current_suggestion: Rc<RefCell<Option<Suggestion>>>,
     dismissals: Rc<RefCell<Dismissals>>,
-    context_dirty: Rc<Cell<bool>>,
+    context_dirty: Rc<ContextDirty>,
     action_sender: Sender<ActionRequest>,
     output_name: String,
     control_center: Rc<ControlCenterView>,

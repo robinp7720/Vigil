@@ -659,14 +659,15 @@ struct NiriWindowPayload {
 }
 
 fn read_niri_json(args: &[&str], env: &CommandEnv) -> Result<String> {
-    let output = Command::new("niri")
-        .args(args)
-        .envs(
+    let output = crate::process::output(
+        Command::new("niri").args(args).envs(
             env.iter()
                 .map(|(key, value)| (key.as_str(), value.as_str())),
-        )
-        .output()
-        .with_context(|| format!("failed to execute niri {}", args.join(" ")))?;
+        ),
+        crate::process::COMMAND_TIMEOUT,
+        None,
+    )
+    .with_context(|| format!("failed to execute niri {}", args.join(" ")))?;
     if !output.status.success() {
         bail!(
             "niri {} failed: {}",
@@ -678,20 +679,21 @@ fn read_niri_json(args: &[&str], env: &CommandEnv) -> Result<String> {
 }
 
 fn default_command_runner(program: &str, args: &[String], env: &CommandEnv) -> Result<()> {
-    let status = Command::new(program)
-        .args(args)
-        .envs(
+    let status = crate::process::output(
+        Command::new(program).args(args).envs(
             env.iter()
                 .map(|(key, value)| (key.as_str(), value.as_str())),
+        ),
+        crate::process::COMMAND_TIMEOUT,
+        None,
+    )
+    .with_context(|| {
+        format!(
+            "failed to execute compositor command: {program} {}",
+            args.join(" ")
         )
-        .status()
-        .with_context(|| {
-            format!(
-                "failed to execute compositor command: {program} {}",
-                args.join(" ")
-            )
-        })?;
-    if !status.success() {
+    })?;
+    if !status.status.success() {
         bail!("compositor command failed: {program} {}", args.join(" "));
     }
     Ok(())

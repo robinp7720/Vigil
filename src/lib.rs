@@ -7,6 +7,7 @@ pub mod integration;
 pub mod ipc;
 pub mod model;
 pub mod notifications;
+mod process;
 pub mod sources;
 pub mod state;
 pub mod suggestions;

@@ -93,7 +93,7 @@ impl<B: ActionBackend> ActionRouter<B> {
             Ok(()) => ActionResult::Completed,
             Err(error) => ActionResult::Failed {
                 summary: "Action failed".to_string(),
-                detail: error.to_string(),
+                detail: format!("{error:#}"),
             },
         }
     }
@@ -278,9 +278,15 @@ pub struct SystemActionBackend {
     compositor: Box<dyn CompositorAdapter>,
     control_client: ControlClient,
     bluetooth: BluetoothControlClient,
+    cancelled: std::sync::Arc<AtomicBool>,
 }
 
 impl SystemActionBackend {
+    pub fn with_cancellation(mut self, cancelled: std::sync::Arc<AtomicBool>) -> Self {
+        self.cancelled = cancelled;
+        self
+    }
+
     pub fn from_env(bluetooth: BluetoothControlClient) -> Result<Self> {
         let env = std::env::vars().collect::<Vec<_>>();
         let env_refs = env
@@ -292,6 +298,7 @@ impl SystemActionBackend {
             compositor: detect_compositor(&env_refs)?,
             control_client: ControlClient::new()?,
             bluetooth,
+            cancelled: Default::default(),
         })
     }
 
@@ -304,6 +311,7 @@ impl SystemActionBackend {
             compositor,
             control_client,
             bluetooth,
+            cancelled: Default::default(),
         }
     }
 }
@@ -314,11 +322,11 @@ impl ActionBackend for SystemActionBackend {
     }
 
     fn execute_service_command(&mut self, spec: ProcessSpec) -> Result<()> {
-        run_process(spec)
+        run_process(spec, Some(&self.cancelled))
     }
 
     fn set_audio_output(&mut self, sink_name: &str) -> Result<()> {
-        set_audio_output(sink_name)
+        set_audio_output(sink_name, Some(&self.cancelled))
     }
 
     fn control_bluetooth(&mut self, command: BluetoothCommand) -> Result<()> {
@@ -348,11 +356,13 @@ impl ActionBackend for SystemActionBackend {
     }
 }
 
-fn run_process(spec: ProcessSpec) -> Result<()> {
-    let output = Command::new(&spec.program)
-        .args(&spec.args)
-        .output()
-        .with_context(|| format!("failed to execute {}", spec.display()))?;
+fn run_process(spec: ProcessSpec, cancelled: Option<&AtomicBool>) -> Result<()> {
+    let output = crate::process::output(
+        Command::new(&spec.program).args(&spec.args),
+        crate::process::COMMAND_TIMEOUT,
+        cancelled,
+    )
+    .with_context(|| format!("failed to execute {}", spec.display()))?;
 
     if output.status.success() {
         return Ok(());
@@ -451,14 +461,14 @@ struct PactlSinkInput {
     index: u64,
 }
 
-fn set_audio_output(sink_name: &str) -> Result<()> {
-    run_process(default_sink_process(sink_name))?;
-    let stream_indices = read_sink_input_indices()
+fn set_audio_output(sink_name: &str, cancelled: Option<&AtomicBool>) -> Result<()> {
+    run_process(default_sink_process(sink_name), cancelled)?;
+    let stream_indices = read_sink_input_indices(cancelled)
         .context("output selected, but current playback streams could not be inspected")?;
     let mut failures = Vec::new();
     for index in stream_indices {
-        if let Err(error) = run_process(move_sink_input_process(index, sink_name)) {
-            let stream_still_exists = read_sink_input_indices()
+        if let Err(error) = run_process(move_sink_input_process(index, sink_name), cancelled) {
+            let stream_still_exists = read_sink_input_indices(cancelled)
                 .map(|current| current.contains(&index))
                 .unwrap_or(true);
             if stream_still_exists {
@@ -477,12 +487,14 @@ fn set_audio_output(sink_name: &str) -> Result<()> {
     }
 }
 
-fn read_sink_input_indices() -> Result<Vec<u64>> {
+fn read_sink_input_indices(cancelled: Option<&AtomicBool>) -> Result<Vec<u64>> {
     let spec = ProcessSpec::new("pactl", ["-f", "json", "list", "sink-inputs"]);
-    let output = Command::new(&spec.program)
-        .args(&spec.args)
-        .output()
-        .with_context(|| format!("failed to execute {}", spec.display()))?;
+    let output = crate::process::output(
+        Command::new(&spec.program).args(&spec.args),
+        crate::process::COMMAND_TIMEOUT,
+        cancelled,
+    )
+    .with_context(|| format!("failed to execute {}", spec.display()))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         bail!("{} exited with {}: {stderr}", spec.display(), output.status);

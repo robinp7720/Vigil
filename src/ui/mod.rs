@@ -47,7 +47,7 @@ use crate::{
 
 pub use surface::{PrimarySurface, ReducedSurface, SurfaceRegistry, surface_specs};
 
-const UI_TICK_INTERVAL: Duration = Duration::from_millis(50);
+const UI_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
 const CONTROL_SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TIMER_TICK_INTERVAL: Duration = Duration::from_secs(1);
 const COMPOSITOR_RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
@@ -76,6 +76,8 @@ struct UiRuntime {
     action_tx: Sender<ActionRequest>,
     control_rx: Receiver<UiControlRequest>,
     control_wakeup: Option<UnixDatagram>,
+    update_wakeup: Option<UnixDatagram>,
+    update_waker: Arc<UnixDatagram>,
     pending_control_actions: BTreeMap<String, Sender<ControlResponse>>,
     next_control_action_id: u64,
     osd: osd::Osd,
@@ -484,17 +486,19 @@ fn install_ui_loop(
 
         let monitors = display.monitors();
         let monitor_dirty_flag = Rc::clone(&monitor_dirty);
+        let waker = state.borrow().update_waker.clone();
         monitors.connect_items_changed(move |_, _, _, _| {
             monitor_dirty_flag.set(true);
+            let _ = waker.send(&[1]);
         });
     }
 
-    {
+    let refresh: Rc<dyn Fn()> = {
         let monitor_dirty = Rc::clone(&monitor_dirty);
         let state = Rc::clone(&state);
         let application = application.clone();
         let theme_provider = Rc::clone(&theme_provider);
-        glib::timeout_add_local(UI_TICK_INTERVAL, move || {
+        Rc::new(move || {
             let mut runtime = state.borrow_mut();
             let now_epoch = current_epoch();
             let mut dirty = drain_updates(&mut runtime, now_epoch);
@@ -508,8 +512,9 @@ fn install_ui_loop(
             dirty |= runtime.store.expire(now_epoch);
             dirty |= runtime.registry.take_context_dirty();
             drain_control_requests(&mut runtime);
-
-            if dirty || monitor_dirty.replace(false) {
+            // Consume the monitor flag even when state was also dirty.
+            dirty |= monitor_dirty.replace(false);
+            if dirty {
                 let snapshot = runtime.store.snapshot().clone();
                 let config = runtime.config.clone();
                 let action_tx = runtime.action_tx.clone();
@@ -517,10 +522,28 @@ fn install_ui_loop(
                     .registry
                     .reconcile(&application, &snapshot, &config, &action_tx);
             }
-
+        })
+    };
+    if let Some(wakeup) = state.borrow_mut().update_wakeup.take() {
+        let refresh = refresh.clone();
+        glib::source::unix_fd_add_local(wakeup.as_raw_fd(), glib::IOCondition::IN, move |_, _| {
+            while wakeup.recv(&mut [0; 64]).is_ok() {}
+            refresh();
             glib::ControlFlow::Continue
         });
     }
+    let waker = state.borrow().update_waker.clone();
+    state
+        .borrow_mut()
+        .registry
+        .set_context_waker(Rc::new(move || {
+            let _ = waker.send(&[1]);
+        }));
+    // Expiry and SIGHUP checks need a clock even with no incoming source events.
+    glib::timeout_add_local(UI_MAINTENANCE_INTERVAL, move || {
+        refresh();
+        glib::ControlFlow::Continue
+    });
 
     let mut runtime = state.borrow_mut();
     let snapshot = runtime.store.snapshot().clone();
@@ -616,9 +639,49 @@ fn drain_updates(runtime: &mut UiRuntime, now_epoch: i64) -> bool {
     dirty
 }
 
+// Keep source APIs as standard channels. The relay wakes GTK only after data
+// is visible in its queue; a full datagram socket already represents a wakeup.
+// The one-second timeout is solely for orderly cancellation of idle relays.
+fn wake_channel<T: Send + 'static>(
+    waker: Arc<UnixDatagram>,
+    cancelled: Arc<AtomicBool>,
+) -> (Sender<T>, Receiver<T>, JoinHandle<()>) {
+    let (sender, incoming) = mpsc::channel();
+    let (outgoing, receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        while !cancelled.load(Ordering::Relaxed) {
+            match incoming.recv_timeout(Duration::from_secs(1)) {
+                Ok(item) => {
+                    if outgoing.send(item).is_err() {
+                        break;
+                    }
+                    // Batch queued messages before waking GTK.
+                    for _ in 0..255 {
+                        let Ok(item) = incoming.try_recv() else {
+                            break;
+                        };
+                        if outgoing.send(item).is_err() {
+                            return;
+                        }
+                    }
+                    let _ = waker.send(&[1]);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    });
+    (sender, receiver, handle)
+}
+
 fn start_runtime(config: AppConfig, config_path: &Path) -> Result<(UiRuntime, RuntimeHandles)> {
-    let (state_tx, state_rx) = mpsc::channel::<StateUpdate>();
     let cancelled = Arc::new(AtomicBool::new(false));
+    let (update_wakeup, update_waker) = UnixDatagram::pair()?;
+    update_wakeup.set_nonblocking(true)?;
+    update_waker.set_nonblocking(true)?;
+    let update_waker = Arc::new(update_waker);
+    let (state_tx, state_rx, state_relay) =
+        wake_channel::<StateUpdate>(update_waker.clone(), cancelled.clone());
     let timer_store = Arc::new(Mutex::new(TimerStore::load(current_epoch())?));
     let (control_tx, control_rx) = mpsc::channel::<UiControlRequest>();
     let (control_wakeup_rx, control_wakeup_tx) = UnixDatagram::pair()?;
@@ -627,6 +690,7 @@ fn start_runtime(config: AppConfig, config_path: &Path) -> Result<(UiRuntime, Ru
     let (bluetooth, bluetooth_join) =
         spawn_bluetooth_source(state_tx.clone(), Arc::clone(&cancelled));
     let mut joins = vec![
+        state_relay,
         spawn_compositor_worker(state_tx.clone(), Arc::clone(&cancelled)),
         spawn_resource_source(state_tx.clone(), Arc::clone(&cancelled)),
         crate::spawn_ai_usage_source(state_tx.clone(), Arc::clone(&cancelled)),
@@ -702,9 +766,13 @@ fn start_runtime(config: AppConfig, config_path: &Path) -> Result<(UiRuntime, Ru
     let mut activity_tracker = ActivityTracker::new(config.thresholds.work_completed_seconds);
     seed_initial_state(&state_rx, &mut store, &mut activity_tracker);
 
-    let router = ActionRouter::new(SystemActionBackend::from_env(bluetooth)?)
-        .with_power_profile_state(store.snapshot().system.power.profile.clone());
-    let (completion_tx, completion_rx) = mpsc::channel();
+    let router = ActionRouter::new(
+        SystemActionBackend::from_env(bluetooth)?.with_cancellation(cancelled.clone()),
+    )
+    .with_power_profile_state(store.snapshot().system.power.profile.clone());
+    let (completion_tx, completion_rx, completion_relay) =
+        wake_channel(update_waker.clone(), cancelled.clone());
+    joins.push(completion_relay);
     let (action_tx, action_handle) =
         spawn_action_worker(router, completion_tx, Arc::clone(&cancelled));
     joins.push(action_handle);
@@ -726,6 +794,8 @@ fn start_runtime(config: AppConfig, config_path: &Path) -> Result<(UiRuntime, Ru
             action_tx,
             control_rx,
             control_wakeup: Some(control_wakeup_rx),
+            update_wakeup: Some(update_wakeup),
+            update_waker,
             pending_control_actions: BTreeMap::new(),
             next_control_action_id: 0,
             osd: osd::Osd::default(),
@@ -1342,6 +1412,28 @@ fn wait_for_cancellation(cancelled: &AtomicBool, duration: Duration) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn source_updates_wake_ui_and_keep_order() {
+        let (reader, writer) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        reader
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx, rx, handle) = super::wake_channel(std::sync::Arc::new(writer), cancelled);
+        for value in 0..100 {
+            tx.send(value).unwrap();
+        }
+        reader.recv(&mut [0; 64]).unwrap();
+        for value in 0..100 {
+            assert_eq!(
+                rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap(),
+                value
+            );
+        }
+        drop(tx);
+        handle.join().unwrap();
+    }
+
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{

@@ -241,3 +241,27 @@ from 0 to 256. Set dimensions to zero and `shadows = false` for an attached,
 square shell, and match the CSS radii and fills. Restart Vigil for native
 geometry changes; SIGHUP reports that a restart is required without partially
 applying geometry.
+
+## Runtime reliability and development
+
+Short-lived service actions, compositor commands, and audio queries have a
+10-second deadline and an 8 MiB limit per output stream. Audio queries and
+service actions also respond to shutdown cancellation. Interrupted or timed-out
+utilities are killed as a process group and their direct child is reaped;
+application launches retain their independent lifetime.
+
+Audio subscriptions combine queued event bursts before refreshing the snapshot.
+Source updates and action completions wake GTK through a nonblocking socket;
+local context changes and monitor changes use the same wakeup. A one-second
+maintenance tick handles expiry and configuration reload checks. The channel
+relay threads check shutdown once per second when idle.
+
+Control requests are limited to 64 KiB, with a 50 ms absolute read deadline.
+Response writes have a 250 ms absolute deadline. Clients bound response reads
+to six seconds and 16 MiB. These limits prevent incomplete requests and stalled
+readers from indefinitely holding the serial control worker.
+
+The control-center coordinator and public spec types remain in
+`src/ui/control_center.rs`; audio/media, connectivity, power, and calendar/timer
+page implementations live in `src/ui/control_center/`. Existing public
+construction and spec APIs remain available.

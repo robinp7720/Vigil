@@ -1,10 +1,10 @@
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,34 @@ use crate::{
     MediaState, NotificationState, TimerState,
 };
 
+const MAX_REQUEST_BYTES: usize = 64 * 1024;
+const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const WRITE_TIMEOUT: Duration = Duration::from_millis(250);
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(6);
 const TRY_SERVE_READ_TIMEOUT: Duration = Duration::from_millis(50);
+
+struct DeadlineReader {
+    stream: UnixStream,
+    deadline: Instant,
+}
+
+impl Read for DeadlineReader {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        self.stream.set_read_timeout(Some(remaining))?;
+        self.stream.read(bytes)
+    }
+}
+
+fn deadline_reader(stream: &UnixStream, timeout: Duration) -> Result<BufReader<DeadlineReader>> {
+    Ok(BufReader::new(DeadlineReader {
+        stream: stream.try_clone()?,
+        deadline: Instant::now() + timeout,
+    }))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -204,11 +231,7 @@ impl ControlClient {
             )
         })?;
         write_json_line(&mut stream, request).context("failed to write control request")?;
-        let mut reader = BufReader::new(
-            stream
-                .try_clone()
-                .context("failed to clone control socket stream")?,
-        );
+        let mut reader = deadline_reader(&stream, CLIENT_TIMEOUT)?;
         read_json_line(&mut reader).context("failed to read control response")
     }
 }
@@ -293,12 +316,8 @@ impl ControlSocket {
             .accept()
             .context("failed to accept control connection")?;
         let request = {
-            let mut reader = BufReader::new(
-                stream
-                    .try_clone()
-                    .context("failed to clone accepted control stream")?,
-            );
-            read_json_line(&mut reader).context("failed to read control request")?
+            let mut reader = deadline_reader(&stream, TRY_SERVE_READ_TIMEOUT)?;
+            try_read_json_line(&mut reader)?.context("incomplete control request")?
         };
         let response = match handler(request) {
             Ok(response) => response,
@@ -322,11 +341,7 @@ impl ControlSocket {
             .set_read_timeout(Some(TRY_SERVE_READ_TIMEOUT))
             .context("failed to set accepted control stream read timeout")?;
         let request = {
-            let mut reader = BufReader::new(
-                stream
-                    .try_clone()
-                    .context("failed to clone accepted control stream")?,
-            );
+            let mut reader = deadline_reader(&stream, TRY_SERVE_READ_TIMEOUT)?;
             match try_read_json_line(&mut reader).context("failed to read control request")? {
                 Some(request) => request,
                 None => return Ok(false),
@@ -397,19 +412,41 @@ fn existing_path_action(
 }
 
 fn write_json_line<T: Serialize>(stream: &mut UnixStream, value: &T) -> Result<()> {
-    serde_json::to_writer(&mut *stream, value).context("serialize control payload")?;
-    stream
-        .write_all(b"\n")
-        .context("write control payload delimiter")?;
-    stream.flush().context("flush control payload")
+    let mut bytes = serde_json::to_vec(value).context("serialize control payload")?;
+    bytes.push(b'\n');
+    let deadline = Instant::now() + WRITE_TIMEOUT;
+    let mut pending = bytes.as_slice();
+    while !pending.is_empty() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            bail!("control payload write timed out");
+        }
+        stream.set_write_timeout(Some(remaining))?;
+        match stream.write(pending) {
+            Ok(0) => bail!("control socket closed while writing"),
+            Ok(count) => pending = &pending[count..],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error).context("write control payload"),
+        }
+    }
+    Ok(())
+}
+
+fn bounded_line(reader: &mut impl BufRead, limit: usize) -> std::io::Result<String> {
+    let mut line = String::new();
+    reader.take((limit + 1) as u64).read_line(&mut line)?;
+    if line.len() > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "control payload exceeds size limit",
+        ));
+    }
+    Ok(line)
 }
 
 fn read_json_line<T: for<'de> Deserialize<'de>>(reader: &mut impl BufRead) -> Result<T> {
-    let mut line = String::new();
-    let read = reader
-        .read_line(&mut line)
-        .context("read control payload line")?;
-    if read == 0 {
+    let line = bounded_line(reader, MAX_RESPONSE_BYTES).context("read control payload line")?;
+    if line.is_empty() {
         bail!("control socket closed before sending a newline-delimited JSON payload");
     }
     serde_json::from_str(line.trim_end()).context("parse control payload")
@@ -418,9 +455,8 @@ fn read_json_line<T: for<'de> Deserialize<'de>>(reader: &mut impl BufRead) -> Re
 fn try_read_json_line<T: for<'de> Deserialize<'de>>(
     reader: &mut impl BufRead,
 ) -> Result<Option<T>> {
-    let mut line = String::new();
-    let read = match reader.read_line(&mut line) {
-        Ok(read) => read,
+    let line = match bounded_line(reader, MAX_REQUEST_BYTES) {
+        Ok(line) => line,
         Err(error)
             if matches!(
                 error.kind(),
@@ -432,7 +468,7 @@ fn try_read_json_line<T: for<'de> Deserialize<'de>>(
         Err(error) => return Err(error).context("read control payload line"),
     };
 
-    if read == 0 {
+    if line.is_empty() {
         bail!("control socket closed before sending a newline-delimited JSON payload");
     }
     if !line.ends_with('\n') {
@@ -449,6 +485,47 @@ fn current_uid() -> u32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn oversized_request_is_rejected_without_reading_whole_stream() {
+        let bytes = vec![b'x'; super::MAX_REQUEST_BYTES * 2];
+        let mut reader = std::io::Cursor::new(bytes);
+        assert!(super::try_read_json_line::<super::ControlRequest>(&mut reader).is_err());
+        assert_eq!(reader.position(), (super::MAX_REQUEST_BYTES + 1) as u64);
+    }
+
+    #[test]
+    fn slow_reader_cannot_hold_response_writer() {
+        let (mut writer, _reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        let start = std::time::Instant::now();
+        assert!(super::write_json_line(&mut writer, &"x".repeat(2 * 1024 * 1024)).is_err());
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn trickling_request_has_absolute_deadline() {
+        use std::io::Write;
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let handle = std::thread::spawn(move || {
+            for _ in 0..20 {
+                if writer.write_all(b" ").is_err() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+        let start = std::time::Instant::now();
+        let mut reader =
+            super::deadline_reader(&reader, std::time::Duration::from_millis(50)).unwrap();
+        assert!(
+            super::try_read_json_line::<super::ControlRequest>(&mut reader)
+                .unwrap()
+                .is_none()
+        );
+        assert!(start.elapsed() < std::time::Duration::from_millis(150));
+        drop(reader);
+        handle.join().unwrap();
+    }
+
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
