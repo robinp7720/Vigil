@@ -105,6 +105,14 @@ impl StateStore {
 
     fn apply_system_update(&mut self, update: SystemUpdate, observed_at: i64) -> bool {
         match update {
+            SystemUpdate::Storage(value) => {
+                if self.snapshot.system.storage == value {
+                    false
+                } else {
+                    self.snapshot.system.storage = value;
+                    true
+                }
+            }
             SystemUpdate::AiUsage(value) => {
                 if self.snapshot.system.ai_usage == value {
                     false
@@ -525,6 +533,7 @@ fn source_for_update(update: &StateUpdate) -> SourceId {
         StateUpdate::System(update) => match update {
             SystemUpdate::KeyboardLayout(_) => SourceId::Compositor,
             SystemUpdate::Resources(_) => SourceId::Resources,
+            SystemUpdate::Storage(_) => SourceId::Storage,
             SystemUpdate::AiUsage(_) => SourceId::AiUsage,
             SystemUpdate::Network(_) => SourceId::Network,
             SystemUpdate::Bluetooth(_) => SourceId::Bluetooth,
@@ -557,6 +566,7 @@ fn freshness_seconds(freshness: &FreshnessConfig, source: SourceId) -> Option<u6
         | SourceId::Activity => None,
         SourceId::Power => Some(freshness.power_seconds),
         SourceId::Resources => Some(freshness.resources_seconds),
+        SourceId::Storage => Some(freshness.storage_seconds),
         SourceId::AiUsage => Some(freshness.ai_usage_seconds),
         SourceId::Brightness => Some(freshness.brightness_seconds),
         SourceId::Calendar | SourceId::CalendarAgenda => Some(freshness.calendar_seconds),
@@ -574,6 +584,54 @@ mod tests {
     };
 
     use super::StateStore;
+
+    #[test]
+    fn storage_preserves_last_snapshot_on_failure_or_staleness_and_recovers() {
+        let mut store = StateStore::default();
+        let storage = crate::StorageState {
+            filesystems: vec![crate::FilesystemUsage {
+                mount_point: "/".into(),
+                filesystem: "ext4".into(),
+                total_bytes: 1000,
+                used_bytes: 500,
+                available_bytes: 450,
+                used_percent: 53,
+            }],
+        };
+        let update = StateUpdate::System(SystemUpdate::Storage(storage.clone()));
+        assert!(store.apply(update.clone(), 100));
+        assert!(!store.apply(update.clone(), 130));
+        assert!(!store.expire(220));
+        assert!(store.expire(221));
+        assert_eq!(store.snapshot().system.storage, storage);
+        assert!(matches!(
+            store
+                .snapshot()
+                .system
+                .source_health
+                .get(&SourceId::Storage),
+            Some(SourceHealth::Stale { .. })
+        ));
+        assert!(store.apply(
+            StateUpdate::Health {
+                source: SourceId::Storage,
+                health: SourceHealth::Disconnected {
+                    message: "device unavailable".into()
+                }
+            },
+            222
+        ));
+        assert_eq!(store.snapshot().system.storage, storage);
+        assert!(store.apply(update, 223));
+        assert_eq!(
+            store
+                .snapshot()
+                .system
+                .source_health
+                .get(&SourceId::Storage),
+            Some(&SourceHealth::Healthy)
+        );
+    }
 
     #[test]
     fn stale_brightness_is_hidden_after_its_freshness_window() {

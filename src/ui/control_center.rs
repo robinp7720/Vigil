@@ -1,6 +1,7 @@
 mod audio;
 mod connectivity;
 mod power;
+mod storage;
 mod time;
 
 use audio::*;
@@ -43,6 +44,7 @@ pub enum ControlCenterFocus {
     Overview,
     Keyboard,
     Resources,
+    Storage,
     AiUsage,
     Network,
     Bluetooth,
@@ -53,10 +55,11 @@ pub enum ControlCenterFocus {
 }
 
 impl ControlCenterFocus {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Overview,
         Self::Keyboard,
         Self::Resources,
+        Self::Storage,
         Self::AiUsage,
         Self::Network,
         Self::Bluetooth,
@@ -71,6 +74,7 @@ impl ControlCenterFocus {
             Self::Overview => "overview",
             Self::Keyboard => "keyboard",
             Self::Resources => "resources",
+            Self::Storage => "storage",
             Self::AiUsage => "ai-usage",
             Self::Network => "network",
             Self::Bluetooth => "bluetooth",
@@ -86,6 +90,7 @@ impl ControlCenterFocus {
             Self::Overview => "Quick Settings",
             Self::Keyboard => "Keyboard",
             Self::Resources => "System Resources",
+            Self::Storage => "Storage",
             Self::AiUsage => "AI Usage",
             Self::Network => "Network",
             Self::Bluetooth => "Bluetooth",
@@ -101,6 +106,7 @@ impl ControlCenterFocus {
             Self::Overview => "System overview",
             Self::Keyboard => "Input layout",
             Self::Resources => "CPU and memory",
+            Self::Storage => "Local filesystem usage",
             Self::AiUsage => "Codex & Claude Code",
             Self::Network => "Connectivity",
             Self::Bluetooth => "Devices and discovery",
@@ -116,6 +122,7 @@ impl ControlCenterFocus {
             Self::Overview => "system",
             Self::Keyboard => "keyboard",
             Self::Resources => "system",
+            Self::Storage => "system",
             Self::AiUsage => "system",
             Self::Network => "network",
             Self::Bluetooth => "bluetooth",
@@ -133,6 +140,7 @@ impl From<DesktopContext> for ControlCenterFocus {
             DesktopContext::Overview => Self::Overview,
             DesktopContext::Keyboard => Self::Keyboard,
             DesktopContext::Resources => Self::Resources,
+            DesktopContext::Storage => Self::Storage,
             DesktopContext::Network => Self::Network,
             DesktopContext::Bluetooth => Self::Bluetooth,
             DesktopContext::Audio => Self::Audio,
@@ -149,6 +157,7 @@ impl From<ControlCenterFocus> for DesktopContext {
             ControlCenterFocus::Overview => Self::Overview,
             ControlCenterFocus::Keyboard => Self::Keyboard,
             ControlCenterFocus::Resources => Self::Resources,
+            ControlCenterFocus::Storage => Self::Storage,
             // AI usage is an internal detail page; Luma's system context is unchanged.
             ControlCenterFocus::AiUsage => Self::Resources,
             ControlCenterFocus::Network => Self::Network,
@@ -308,6 +317,8 @@ pub struct ControlCenterSpec {
     pub keyboard: KeyboardControlSpec,
     pub cpu_percent: Option<u8>,
     pub memory_percent: Option<u8>,
+    pub storage: crate::StorageState,
+    pub storage_health: Option<SourceHealth>,
     pub ai_usage: crate::AiUsageState,
     pub ai_usage_health: Option<SourceHealth>,
     pub battery_present: bool,
@@ -484,6 +495,8 @@ pub fn build_control_center_spec(snapshot: &BarSnapshot) -> ControlCenterSpec {
         keyboard: keyboard_control_spec(&system.keyboard_layout),
         cpu_percent: system.resources.cpu_percent,
         memory_percent: system.resources.memory_percent,
+        storage: system.storage.clone(),
+        storage_health: system.source_health.get(&SourceId::Storage).cloned(),
         ai_usage: system.ai_usage.clone(),
         ai_usage_health: system.source_health.get(&SourceId::AiUsage).cloned(),
         battery_present: system.power.battery_present,
@@ -1030,6 +1043,8 @@ pub struct ControlCenterView {
     artwork: ArtworkController,
     keyboard_summary: gtk::Label,
     resources_summary: gtk::Label,
+    storage: storage::StorageView,
+    storage_summaries: Vec<gtk::Label>,
     ai_usage: AiUsageView,
     ai_usage_summary: gtk::Label,
     battery_summary_button: gtk::Button,
@@ -1321,6 +1336,10 @@ impl ControlCenterView {
         summaries.append(&time_summary_button);
         overview.append(&section_eyebrow("AT A GLANCE"));
         overview.append(&summaries);
+        let (storage_button, storage_summary) = summary_tile("drive-harddisk-symbolic", "Storage");
+        storage_summary.set_max_width_chars(40);
+        connect_navigation(&storage_button, ControlCenterFocus::Storage, &navigation);
+        overview.append(&storage_button);
         overview.append(&section_eyebrow("DESKTOP"));
         overview.append(&desktop_mode_row(ActionHandle {
             sender: action_sender.clone(),
@@ -1391,6 +1410,13 @@ impl ControlCenterView {
         let memory_gauge = metric_row("Memory");
         resources_page.append(&cpu_gauge.root);
         resources_page.append(&memory_gauge.root);
+        let (storage_button, resources_storage_summary) =
+            summary_tile("drive-harddisk-symbolic", "Storage");
+        resources_storage_summary.set_max_width_chars(40);
+        connect_navigation(&storage_button, ControlCenterFocus::Storage, &navigation);
+        resources_page.append(&storage_button);
+        let storage = storage::StorageView::new();
+        stack.add_named(&storage.root, Some(ControlCenterFocus::Storage.as_str()));
         let (ai_usage_button, ai_usage_summary) =
             summary_tile("applications-science-symbolic", "AI Usage");
         connect_navigation(&ai_usage_button, ControlCenterFocus::AiUsage, &navigation);
@@ -1770,6 +1796,8 @@ impl ControlCenterView {
             artwork,
             keyboard_summary,
             resources_summary,
+            storage,
+            storage_summaries: vec![storage_summary, resources_storage_summary],
             ai_usage,
             ai_usage_summary,
             battery_summary_button,
@@ -1997,6 +2025,13 @@ impl ControlCenterView {
         self.artwork.show(spec.media.as_ref(), &self.media_widgets);
 
         self.keyboard_summary.set_label(&spec.keyboard.summary);
+        self.storage
+            .update(&spec.storage, spec.storage_health.as_ref());
+        let storage_summary = storage::summary(&spec.storage, spec.storage_health.as_ref());
+        for label in &self.storage_summaries {
+            label.set_label(&storage_summary);
+            label.set_tooltip_text(Some(&storage_summary));
+        }
         self.ai_usage
             .update(&spec.ai_usage, spec.ai_usage_health.as_ref());
         self.ai_usage_summary.set_label(&super::ai_usage::label(

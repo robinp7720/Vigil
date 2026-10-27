@@ -1597,7 +1597,7 @@ impl PrimarySurface {
             ControlCenterFocus::Power => Some(SystemModuleId::Power),
             ControlCenterFocus::Notifications => Some(SystemModuleId::Notifications),
             ControlCenterFocus::Clock => Some(SystemModuleId::Clock),
-            ControlCenterFocus::Overview => None,
+            ControlCenterFocus::Overview | ControlCenterFocus::Storage => None,
         };
         module_id
             .and_then(|id| self.status_buttons.get(&id))

@@ -693,6 +693,7 @@ fn start_runtime(config: AppConfig, config_path: &Path) -> Result<(UiRuntime, Ru
         state_relay,
         spawn_compositor_worker(state_tx.clone(), Arc::clone(&cancelled)),
         spawn_resource_source(state_tx.clone(), Arc::clone(&cancelled)),
+        crate::sources::storage::spawn_storage_source(state_tx.clone(), Arc::clone(&cancelled)),
         crate::spawn_ai_usage_source(state_tx.clone(), Arc::clone(&cancelled)),
         spawn_power_source(state_tx.clone(), Arc::clone(&cancelled)),
         spawn_network_source(state_tx.clone(), Arc::clone(&cancelled)),

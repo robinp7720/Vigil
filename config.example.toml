@@ -28,6 +28,7 @@ reduced = ["workspaces", "focused_title", "critical_warning", "clock"]
 [freshness]
 compositor_seconds = 10
 resources_seconds = 15
+storage_seconds = 90
 ai_usage_seconds = 45
 power_seconds = 30
 network_seconds = 30

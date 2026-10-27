@@ -109,6 +109,22 @@ underneath. Quick settings also closes on a press outside the panel; Hyprland gi
 pointer focus to a newly mapped overlay, so this keeps a still-pointer click from
 being swallowed.
 
+## Storage usage
+
+Open **Storage** from Quick Settings or System Resources to see each local
+filesystem's used, total, and available space. Usage bars turn amber at 75% and
+red at 90%. Available space excludes filesystem reservations, so usage matches
+`df` and reflects the space applications can actually use.
+
+Snapshots refresh every 30 seconds using GNU `df` (coreutils), with bounded
+execution off the UI thread. Network mounts, temporary filesystems, and duplicate
+mounts are omitted. Failed or stale reads are labeled; the last snapshot remains
+visible. Set `freshness.storage_seconds` to change the stale deadline (default 90).
+
+```bash
+vigil control-center open --context storage
+```
+
 ## AI token usage
 
 The `ai_usage` module shows today's combined Codex and Claude Code token count on

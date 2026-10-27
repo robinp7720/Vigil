@@ -50,11 +50,12 @@ pub use model::{
     BluetoothPairingPromptKind, BluetoothPairingResponse, BluetoothState, BrightnessState,
     CalendarAgenda, CalendarAgendaEvent, CalendarEvent, ClockState, CommandActivity,
     ConnectivityState, ContextAction, ContextActionSpec, ContextHealth, ContextSnapshot,
-    DesktopContext, Direction, KeyboardLayoutOption, KeyboardLayoutState, LockscreenSnapshot,
-    MediaControlAction, MediaState, NetworkState, Notification, NotificationAction,
-    NotificationState, NotificationUrgency, OutputRole, OutputState, PlaybackStatus, PowerProfile,
-    PowerState, PowerStats, ResourceState, SourceHealth, SourceId, StateUpdate, SystemState,
-    SystemUpdate, TimerState, TokenUsage, WindowState, WorkspaceState,
+    DesktopContext, Direction, FilesystemUsage, KeyboardLayoutOption, KeyboardLayoutState,
+    LockscreenSnapshot, MediaControlAction, MediaState, NetworkState, Notification,
+    NotificationAction, NotificationState, NotificationUrgency, OutputRole, OutputState,
+    PlaybackStatus, PowerProfile, PowerState, PowerStats, ResourceState, SourceHealth, SourceId,
+    StateUpdate, StorageState, SystemState, SystemUpdate, TimerState, TokenUsage, WindowState,
+    WorkspaceState,
 };
 pub use notifications::{NotificationCommand, NotificationControl, spawn_notification_server};
 pub use sources::{

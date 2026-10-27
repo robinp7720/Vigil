@@ -120,6 +120,8 @@ pub struct SystemState {
     pub keyboard_layout: KeyboardLayoutState,
     pub resources: ResourceState,
     #[serde(default)]
+    pub storage: StorageState,
+    #[serde(default)]
     pub ai_usage: AiUsageState,
     pub network: NetworkState,
     pub bluetooth: BluetoothState,
@@ -142,6 +144,7 @@ pub struct SystemState {
 pub enum SystemUpdate {
     KeyboardLayout(KeyboardLayoutState),
     Resources(ResourceState),
+    Storage(StorageState),
     AiUsage(AiUsageState),
     Network(NetworkState),
     Bluetooth(BluetoothState),
@@ -219,6 +222,23 @@ pub struct KeyboardLayoutOption {
 pub struct ResourceState {
     pub cpu_percent: Option<u8>,
     pub memory_percent: Option<u8>,
+}
+
+/// One entry per local filesystem; bind mounts and subvolumes share capacity.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageState {
+    pub filesystems: Vec<FilesystemUsage>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilesystemUsage {
+    pub mount_point: String,
+    pub filesystem: String,
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub available_bytes: u64,
+    /// Percentage of space usable by this user, including reserved-space effects.
+    pub used_percent: u8,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -415,6 +435,7 @@ pub enum DesktopContext {
     Overview,
     Keyboard,
     Resources,
+    Storage,
     Network,
     Bluetooth,
     Audio,
@@ -424,10 +445,11 @@ pub enum DesktopContext {
 }
 
 impl DesktopContext {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Overview,
         Self::Keyboard,
         Self::Resources,
+        Self::Storage,
         Self::Network,
         Self::Bluetooth,
         Self::Audio,
@@ -441,6 +463,7 @@ impl DesktopContext {
             Self::Overview => "overview",
             Self::Keyboard => "keyboard",
             Self::Resources => "resources",
+            Self::Storage => "storage",
             Self::Network => "network",
             Self::Bluetooth => "bluetooth",
             Self::Audio => "audio",
@@ -690,6 +713,7 @@ pub enum SourceId {
     Compositor,
     Power,
     Resources,
+    Storage,
     AiUsage,
     Network,
     Bluetooth,

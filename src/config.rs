@@ -93,6 +93,7 @@ impl AppConfig {
             "freshness.ai_usage_seconds",
             self.freshness.ai_usage_seconds,
         )?;
+        validate_positive("freshness.storage_seconds", self.freshness.storage_seconds)?;
         validate_positive("freshness.power_seconds", self.freshness.power_seconds)?;
         validate_positive("freshness.network_seconds", self.freshness.network_seconds)?;
         validate_positive(
@@ -449,6 +450,7 @@ pub enum RoutineContextDetail {
 pub struct FreshnessConfig {
     pub compositor_seconds: u64,
     pub resources_seconds: u64,
+    pub storage_seconds: u64,
     pub ai_usage_seconds: u64,
     pub power_seconds: u64,
     pub network_seconds: u64,
@@ -465,6 +467,7 @@ impl Default for FreshnessConfig {
         Self {
             compositor_seconds: 10,
             resources_seconds: 15,
+            storage_seconds: 90,
             ai_usage_seconds: 45,
             power_seconds: 30,
             network_seconds: 30,

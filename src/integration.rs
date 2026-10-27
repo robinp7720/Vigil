@@ -68,6 +68,24 @@ pub fn context_snapshot(snapshot: &BarSnapshot, context: DesktopContext) -> Cont
         DesktopContext::Overview => overview_snapshot(snapshot),
         DesktopContext::Keyboard => keyboard_snapshot(snapshot),
         DesktopContext::Resources => resources_snapshot(snapshot),
+        DesktopContext::Storage => {
+            let storage = &snapshot.system.storage;
+            let summary = storage
+                .filesystems
+                .iter()
+                .max_by_key(|entry| entry.used_percent)
+                .map(|entry| format!("{} · {}% used", entry.mount_point, entry.used_percent))
+                .unwrap_or_else(|| "No local filesystems available".to_string());
+            make_snapshot(
+                DesktopContext::Storage,
+                "Storage",
+                "drive-harddisk-symbolic",
+                summary,
+                "Local filesystem usage",
+                source_health(snapshot, SourceId::Storage),
+                Vec::new(),
+            )
+        }
         DesktopContext::Network => network_snapshot(snapshot),
         DesktopContext::Bluetooth => bluetooth_snapshot(snapshot),
         DesktopContext::Audio => audio_snapshot(snapshot),

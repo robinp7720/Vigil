@@ -7,6 +7,7 @@ pub mod media;
 pub mod network;
 pub mod power;
 pub mod resources;
+pub mod storage;
 
 use std::ffi::CStr;
 use std::sync::{
