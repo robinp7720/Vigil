@@ -7,7 +7,7 @@ use std::sync::{
     mpsc::{self, RecvTimeoutError, Sender},
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -16,6 +16,7 @@ use crate::{MediaState, PlaybackStatus, SourceHealth, SourceId, StateUpdate, Sys
 const FIELD_SEPARATOR: char = '\u{1f}';
 const PLAYERCTL_EVENT_TIMEOUT: Duration = Duration::from_millis(250);
 const MEDIA_RESTART_DELAY: Duration = Duration::from_secs(1);
+const MEDIA_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const PREFERRED_PLAYER_FAMILIES: &[&str] = &[
     "spotify",
     "ncspot",
@@ -169,7 +170,7 @@ fn parse_playback_status(value: &str) -> PlaybackStatus {
 
 fn playerctl_format() -> String {
     format!(
-        "{{{{playerName}}}}{FIELD_SEPARATOR}{{{{status}}}}{FIELD_SEPARATOR}{{{{title}}}}{FIELD_SEPARATOR}{{{{artist}}}}{FIELD_SEPARATOR}{{{{mpris:artUrl}}}}"
+        "{{{{playerInstance}}}}{FIELD_SEPARATOR}{{{{status}}}}{FIELD_SEPARATOR}{{{{title}}}}{FIELD_SEPARATOR}{{{{artist}}}}{FIELD_SEPARATOR}{{{{mpris:artUrl}}}}"
     )
 }
 
@@ -186,12 +187,15 @@ fn publish_media_state(
     }
 }
 
-fn read_initial_players() -> Result<BTreeMap<String, MediaState>> {
-    let output = Command::new("playerctl")
-        .args(["--all-players", "metadata", "--format"])
-        .arg(playerctl_format())
-        .output()
-        .context("failed to execute playerctl metadata")?;
+fn read_players(cancelled: &AtomicBool) -> Result<BTreeMap<String, MediaState>> {
+    let output = crate::process::output(
+        Command::new("playerctl")
+            .args(["--all-players", "metadata", "--format"])
+            .arg(playerctl_format()),
+        MEDIA_REFRESH_INTERVAL,
+        Some(cancelled),
+    )
+    .context("failed to execute playerctl metadata")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -211,6 +215,26 @@ fn read_initial_players() -> Result<BTreeMap<String, MediaState>> {
         let _ = apply_player_event(&mut players, event);
     }
     Ok(players)
+}
+
+fn reconcile_players(
+    players: &mut BTreeMap<String, MediaState>,
+    current: BTreeMap<String, MediaState>,
+) -> Option<MediaState> {
+    let mut refreshed = BTreeMap::new();
+    for (player, mut state) in current {
+        if state.art_url.is_none()
+            && let Some(previous) = players.get(&player)
+            && state.title.is_some()
+            && previous.title == state.title
+            && (state.artist.is_none() || previous.artist == state.artist)
+        {
+            state.art_url = previous.art_url.clone();
+        }
+        refreshed.insert(player, state);
+    }
+    *players = refreshed;
+    preferred_player(players)
 }
 
 fn spawn_playerctl_bridge() -> Result<(Child, mpsc::Receiver<Result<String>>)> {
@@ -249,45 +273,60 @@ fn pump_lines(stdout: ChildStdout, sender: mpsc::Sender<Result<String>>) {
 }
 
 fn run_media_worker(sender: &Sender<StateUpdate>, cancelled: &Arc<AtomicBool>) -> Result<bool> {
-    let mut players = read_initial_players()?;
+    let mut players = read_players(cancelled)?;
     publish_media_state(sender, cancelled, preferred_player(&players));
 
     let (mut child, receiver) = spawn_playerctl_bridge()?;
-    loop {
-        if cancelled.load(Ordering::Relaxed) {
-            kill_child(&mut child);
-            return Ok(false);
-        }
+    let result = (|| {
+        let mut refreshed_at = Instant::now();
+        loop {
+            if cancelled.load(Ordering::Relaxed) {
+                return Ok(false);
+            }
 
-        match receiver.recv_timeout(PLAYERCTL_EVENT_TIMEOUT) {
-            Ok(Ok(line)) => {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let event = parse_playerctl_event(&line)?;
-                let selection = apply_player_event(&mut players, event);
+            // Metadata follow does not identify vanished players, and may emit no
+            // line when one disappears while another remains. Reconcile even when
+            // the stream is busy so cached players cannot outlive their bus names.
+            if refreshed_at.elapsed() >= MEDIA_REFRESH_INTERVAL {
+                let selection = reconcile_players(&mut players, read_players(cancelled)?);
                 publish_media_state(sender, cancelled, selection);
+                refreshed_at = Instant::now();
             }
-            Ok(Err(error)) => {
-                kill_child(&mut child);
-                return Err(error);
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                if let Some(status) = child
-                    .try_wait()
-                    .context("failed to poll playerctl --follow")?
-                {
-                    if status.success() {
-                        return Ok(true);
+
+            match receiver.recv_timeout(PLAYERCTL_EVENT_TIMEOUT) {
+                Ok(Ok(line)) => {
+                    if line.trim().is_empty() {
+                        let selection = reconcile_players(&mut players, read_players(cancelled)?);
+                        publish_media_state(sender, cancelled, selection);
+                        refreshed_at = Instant::now();
+                        continue;
                     }
-                    return Err(anyhow!("playerctl --follow metadata exited with {status}"));
+                    let event = parse_playerctl_event(&line)?;
+                    let selection = apply_player_event(&mut players, event);
+                    publish_media_state(sender, cancelled, selection);
                 }
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                return Ok(true);
+                Ok(Err(error)) => {
+                    return Err(error);
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if let Some(status) = child
+                        .try_wait()
+                        .context("failed to poll playerctl --follow")?
+                    {
+                        if status.success() {
+                            return Ok(true);
+                        }
+                        return Err(anyhow!("playerctl --follow metadata exited with {status}"));
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Ok(true);
+                }
             }
         }
-    }
+    })();
+    kill_child(&mut child);
+    result
 }
 
 fn kill_child(child: &mut Child) {
@@ -319,7 +358,10 @@ pub fn spawn_media_source(
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{FIELD_SEPARATOR, apply_player_event, parse_playerctl_event, player_priority};
+    use super::{
+        FIELD_SEPARATOR, apply_player_event, parse_playerctl_event, player_priority,
+        reconcile_players,
+    };
     use crate::{MediaState, PlaybackStatus};
 
     fn event_line(player: &str, status: &str, title: &str, artist: &str) -> String {
@@ -524,5 +566,155 @@ mod tests {
         let selected = apply_player_event(&mut players, next_track).unwrap();
 
         assert_eq!(selected.art_url, None);
+    }
+
+    #[test]
+    fn refresh_removes_vanished_players_and_preserves_current_track_artwork() {
+        let mut players = BTreeMap::new();
+        for line in [
+            event_line("kdeconnect", "Paused", "Remote track", "Phone"),
+            event_line_with_art(
+                "firefox.instance_1",
+                "Paused",
+                "Video",
+                "Browser",
+                "file:///tmp/art.jpg",
+            ),
+        ] {
+            apply_player_event(&mut players, parse_playerctl_event(&line).unwrap());
+        }
+        assert_eq!(
+            super::preferred_player(&players).unwrap().player,
+            "kdeconnect"
+        );
+
+        let mut current = BTreeMap::new();
+        apply_player_event(
+            &mut current,
+            parse_playerctl_event(&event_line(
+                "firefox.instance_1",
+                "Paused",
+                "Video",
+                "Browser",
+            ))
+            .unwrap(),
+        );
+        let selected = reconcile_players(&mut players, current).unwrap();
+        assert_eq!(selected.player, "firefox.instance_1");
+        assert_eq!(selected.art_url.as_deref(), Some("file:///tmp/art.jpg"));
+        assert_eq!(players.len(), 1);
+
+        assert_eq!(reconcile_players(&mut players, BTreeMap::new()), None);
+        assert!(players.is_empty());
+    }
+
+    struct TestPlayer;
+
+    #[zbus::interface(name = "org.mpris.MediaPlayer2.Player")]
+    impl TestPlayer {
+        #[zbus(property)]
+        fn can_play(&self) -> bool {
+            true
+        }
+
+        #[zbus(property)]
+        fn playback_status(&self) -> &str {
+            "Paused"
+        }
+
+        #[zbus(property)]
+        fn metadata(&self) -> std::collections::HashMap<&str, zbus::zvariant::Value<'_>> {
+            std::collections::HashMap::from([("xesam:title", "Test track".into())])
+        }
+
+        #[zbus(property)]
+        fn position(&self) -> i64 {
+            0
+        }
+
+        #[zbus(property)]
+        fn volume(&self) -> f64 {
+            1.0
+        }
+    }
+
+    #[test]
+    fn vanished_players_are_removed_without_stopped_events() {
+        use std::process::Command;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        use std::time::{Duration, Instant};
+
+        // Keep the fixture and all playerctl children off the desktop session bus.
+        const TEST_BUS: &str = "VIGIL_MEDIA_TEST_BUS";
+        if std::env::var_os(TEST_BUS).is_none() {
+            let output = crate::process::output(
+                Command::new("dbus-run-session")
+                    .arg("--")
+                    .arg(std::env::current_exe().unwrap())
+                    .args(["--exact", "sources::media::tests::vanished_players_are_removed_without_stopped_events", "--nocapture"])
+                    .env(TEST_BUS, "1"),
+                Duration::from_secs(15),
+                None,
+            ).unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let connection = zbus::blocking::connection::Builder::session()
+            .unwrap()
+            .serve_at("/org/mpris/MediaPlayer2", TestPlayer)
+            .unwrap()
+            .build()
+            .unwrap();
+        let names = [
+            "org.mpris.MediaPlayer2.kdeconnect",
+            "org.mpris.MediaPlayer2.firefox.instance_1",
+            "org.mpris.MediaPlayer2.firefox.instance_2",
+        ];
+        for name in names {
+            connection.request_name(name).unwrap();
+        }
+        assert_eq!(
+            super::read_players(&AtomicBool::new(false)).unwrap().len(),
+            3
+        );
+        let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
+        let worker =
+            std::thread::spawn(move || super::run_media_worker(&sender, &worker_cancelled));
+        let expect_player = |expected: Option<&str>| {
+            let deadline = Instant::now() + Duration::from_secs(4);
+            loop {
+                let update = receiver
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .unwrap_or_else(|error| panic!("waiting for {expected:?}: {error}"));
+                if let crate::StateUpdate::System(crate::SystemUpdate::Media(media)) = update
+                    && media.as_ref().map(|state| state.player.as_str()) == expected
+                {
+                    break;
+                }
+            }
+        };
+        expect_player(Some("kdeconnect"));
+        connection.release_name(names[0]).unwrap();
+        expect_player(Some("firefox.instance_1"));
+        connection.release_name(names[1]).unwrap();
+        expect_player(Some("firefox.instance_2"));
+        connection.release_name(names[2]).unwrap();
+        expect_player(None);
+        connection.request_name(names[0]).unwrap();
+        expect_player(Some("kdeconnect"));
+        cancelled.store(true, Ordering::Relaxed);
+        assert!(!worker.join().unwrap().unwrap());
     }
 }

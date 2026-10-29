@@ -72,6 +72,10 @@ vigil media get          # {"type":"media","media":{...}} or "media":null
 vigil media play-pause   # also next / previous
 ```
 
+Media updates follow playerctl events and reconcile with the current players
+every two seconds to discard vanished players. Exact player instance names keep
+selection and transport controls aligned when several instances are running.
+
 Every bar also has a desktop-search button:
 left-click opens Luma under the button on that output, and right-click opens window search.
 When supervised by systemd, launched applications get independent user scopes
