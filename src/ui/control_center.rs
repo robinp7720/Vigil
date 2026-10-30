@@ -15,6 +15,7 @@ use std::rc::Rc;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
+use gtk::gio::prelude::ListModelExtManual;
 use gtk::glib;
 use gtk::prelude::*;
 use gtk4 as gtk;
@@ -835,6 +836,7 @@ struct ControlCenterMotion {
     panel: glib::WeakRef<MorphBin>,
     phase: Cell<ControlCenterMotionPhase>,
     origin: Cell<MorphOrigin>,
+    dismiss_windows: RefCell<Vec<gtk::ApplicationWindow>>,
 }
 
 impl ControlCenterMotion {
@@ -845,6 +847,67 @@ impl ControlCenterMotion {
             panel: panel.downgrade(),
             phase: Cell::new(ControlCenterMotionPhase::Hidden),
             origin: Cell::new(MorphOrigin::Scaled(0.92)),
+            dismiss_windows: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Layer surfaces only receive clicks inside their input region. Cover every
+    /// output behind the panel so a click on the desktop, bar, or another monitor
+    /// can dismiss it without relying on keyboard focus changes.
+    fn show_dismiss_windows(self: &Rc<Self>, panel_window: &gtk::ApplicationWindow) {
+        if !self.dismiss_windows.borrow().is_empty() {
+            return;
+        }
+        let Some(application) = panel_window.application() else {
+            return;
+        };
+        let display = gtk::prelude::WidgetExt::display(panel_window);
+        for monitor in display.monitors().iter::<gtk::gdk::Monitor>().flatten() {
+            let window = gtk::ApplicationWindow::builder()
+                .application(&application)
+                .title("Vigil Quick Settings Dismiss Target")
+                .decorated(false)
+                .build();
+            // Use the panel's transparent window styling and compositor rules.
+            window.add_css_class("control-center-window");
+            window.init_layer_shell();
+            window.set_namespace(Some("vigil-control-center"));
+            window.set_layer(Layer::Overlay);
+            for edge in [Edge::Top, Edge::Right, Edge::Bottom, Edge::Left] {
+                window.set_anchor(edge, true);
+            }
+            window.set_exclusive_zone(-1);
+            window.set_keyboard_mode(KeyboardMode::None);
+            window.set_monitor(Some(&monitor));
+            // An empty transparent widget produces no render node, so GDK never
+            // attaches a buffer and the compositor cannot deliver clicks to it.
+            let target_area = gtk::DrawingArea::new();
+            target_area.set_draw_func(|_, context, _, _| {
+                context.set_operator(gtk::cairo::Operator::Source);
+                context.set_source_rgba(0.0, 0.0, 0.0, 0.0);
+                let _ = context.paint();
+            });
+            window.set_child(Some(&target_area));
+            let click = gtk::GestureClick::new();
+            click.set_button(0);
+            click.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let motion = Rc::downgrade(self);
+            click.connect_pressed(move |gesture, _, _, _| {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                if let Some(motion) = motion.upgrade() {
+                    motion.dismiss();
+                }
+            });
+            window.add_controller(click);
+            // Map before the panel so the panel's controls remain above it.
+            window.present();
+            self.dismiss_windows.borrow_mut().push(window);
+        }
+    }
+
+    fn hide_dismiss_windows(&self) {
+        for window in self.dismiss_windows.borrow_mut().drain(..) {
+            window.close();
         }
     }
 
@@ -867,6 +930,7 @@ impl ControlCenterMotion {
         ) else {
             return;
         };
+        self.show_dismiss_windows(&window);
         root.set_sensitive(true);
         self.origin.set(origin);
         if !animations_enabled() {
@@ -937,6 +1001,7 @@ impl ControlCenterMotion {
                 if let Some(window) = motion.window.upgrade() {
                     window.set_visible(false);
                 }
+                motion.hide_dismiss_windows();
             }
             after();
         });
@@ -944,6 +1009,7 @@ impl ControlCenterMotion {
 
     /// Hides without animation; used by the session lock and output changes.
     fn hide_now(&self) {
+        self.hide_dismiss_windows();
         if let Some(panel) = self.panel.upgrade() {
             panel.cancel();
         }
@@ -1746,7 +1812,8 @@ impl ControlCenterView {
         // The compositor can leave pointer focus on the stage after it opens under a still
         // pointer; a press outside the panel then dismisses it, like clicking the opener again.
         let away = gtk::GestureClick::new();
-        away.set_button(1);
+        away.set_button(0);
+        away.set_propagation_phase(gtk::PropagationPhase::Capture);
         let motion_for_away = motion.clone();
         let panel_for_away = panel_morph.downgrade();
         away.connect_pressed(move |gesture, _, x, y| {

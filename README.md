@@ -107,11 +107,11 @@ status cluster on the primary output, or from a centered scale on other outputs.
 Interrupting a morph reverses it from the shape on screen. Disabling GTK animations
 (`gtk-enable-animations=false`) makes every change instant, and
 `vigil control-center close` always hides immediately so nothing lingers above the lock
-screen. Quick settings and toasts use transparent full-height overlay surfaces whose
-input region follows the visible shapes, so clicks beside them reach the windows
-underneath. Quick settings also closes on a press outside the panel; Hyprland gives
-pointer focus to a newly mapped overlay, so this keeps a still-pointer click from
-being swallowed.
+screen. Toast input regions follow their visible shapes, so clicks beside them reach
+the windows underneath. While quick settings is open, transparent dismissal surfaces
+cover every output behind the panel. Clicking anywhere outside the panel, including
+the bar or another monitor, closes quick settings and consumes that click. These
+surfaces are removed when the panel closes.
 
 ## Storage usage
 
