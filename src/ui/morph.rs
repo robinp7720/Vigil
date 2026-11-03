@@ -109,6 +109,12 @@ impl Spring {
         self.remainder = 0.0;
     }
 
+    /// Moves value and target together, keeping the motion in flight.
+    pub fn offset(&mut self, delta: f64) {
+        self.value += delta;
+        self.target += delta;
+    }
+
     pub fn snap(&mut self, value: f64) {
         self.restart(value, value, 0.0);
     }

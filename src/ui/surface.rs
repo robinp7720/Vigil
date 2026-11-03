@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::mpsc::Sender;
 
 use gtk::gdk;
@@ -31,10 +31,15 @@ use super::popovers::PopoverCoordinator;
 use super::stage::{self, BAR_HEIGHT};
 use super::system::{SystemButtonSpec, SystemCluster, SystemModuleId, build_system_cluster};
 use super::wm::{WindowGroupSpec, select_primary_output, title_for_output, window_groups};
-use super::workspace_pill::WorkspacePill;
+use super::workspace_pill::{PillHold, WorkspacePill};
 
 const WORKSPACE_BUTTON_MIN_WIDTH: i32 = 32;
 const WORKSPACE_BUTTON_MIN_HEIGHT: i32 = 28;
+/// Space between workspace buttons. Each button carries it as a leading margin
+/// so a departing button's gap collapses along with it.
+const WORKSPACE_GAP: i32 = 8;
+/// How long a workspace slot takes to open or close.
+const WORKSPACE_SLOT_MS: u32 = 240;
 const CENTER_TEXT_MAX_CHARS: i32 = 56;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1792,30 +1797,42 @@ fn bar_window_width_for_monitor_width(monitor_width: i32) -> i32 {
         .max(1)
 }
 
+/// Workspace buttons, each in a revealer slot. A new workspace's slot opens
+/// and a destroyed one's collapses and fades before it is removed, so the
+/// neighbours and the title slide instead of jumping.
 struct WorkspaceStrip {
-    container: gtk::Box,
+    slots: gtk::Box,
     pill: WorkspacePill,
     views: BTreeMap<String, WorkspaceButtonView>,
+    /// Slots still collapsing; they drop out of the map once fully closed.
+    leaving: Rc<RefCell<BTreeMap<String, WorkspaceButtonView>>>,
     order: Vec<String>,
     action_sender: Sender<ActionRequest>,
     output_name: String,
 }
 
 struct WorkspaceButtonView {
+    slot: gtk::Revealer,
     button: gtk::Button,
     spec: WorkspaceButtonSpec,
+    /// Held while the slot animates so the pill follows the reflow.
+    hold: Rc<RefCell<Option<PillHold>>>,
 }
 
 impl WorkspaceStrip {
     fn new(action_sender: Sender<ActionRequest>, output_name: String) -> Self {
-        let container = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        // The styled strip holds one spacing-free box: gaps live on the buttons.
+        let container = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         container.add_css_class("workspace-strip");
+        let slots = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        container.append(&slots);
         install_workspace_scroll(&container, action_sender.clone(), output_name.clone());
-        let pill = WorkspacePill::new(&container, output_name.clone());
+        let pill = WorkspacePill::new(&container, output_name.clone(), WORKSPACE_GAP as f32);
         Self {
-            container,
+            slots,
             pill,
             views: BTreeMap::new(),
+            leaving: Rc::new(RefCell::new(BTreeMap::new())),
             order: Vec::new(),
             action_sender,
             output_name,
@@ -1832,33 +1849,52 @@ impl WorkspaceStrip {
             .map(|workspace| workspace.id.clone())
             .collect::<Vec<_>>();
         let desired = next_order.iter().cloned().collect::<BTreeSet<_>>();
-        self.views.retain(|id, _| desired.contains(id));
+        let departed = self
+            .views
+            .keys()
+            .filter(|id| !desired.contains(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for id in departed {
+            if let Some(view) = self.views.remove(&id) {
+                self.depart(id, view);
+            }
+        }
 
         for spec in workspaces {
             if let Some(view) = self.views.get_mut(&spec.id) {
                 view.update(spec);
                 continue;
             }
+            let revived = self.leaving.borrow_mut().remove(&spec.id);
+            if let Some(mut view) = revived {
+                // Recreated before its slot finished closing: reopen it in place.
+                view.slot.set_can_target(true);
+                view.slot.set_opacity(1.0);
+                *view.hold.borrow_mut() = Some(self.pill.hold());
+                view.slot.set_reveal_child(true);
+                view.update(spec);
+                self.views.insert(spec.id.clone(), view);
+                continue;
+            }
+            // The first population appears at once; later arrivals open up.
+            let opens = !self.order.is_empty() && self.slots.is_mapped() && animations_enabled();
             let view = WorkspaceButtonView::new(
                 spec,
                 self.action_sender.clone(),
                 self.output_name.clone(),
+                Rc::downgrade(&self.leaving),
+                opens,
             );
             flash_class(&view.button, "workspace-new", 420);
             self.views.insert(spec.id.clone(), view);
         }
 
         if self.order != next_order {
-            while let Some(child) = self.container.first_child() {
-                self.container.remove(&child);
-            }
-            for id in &next_order {
-                if let Some(view) = self.views.get(id) {
-                    self.container.append(&view.button);
-                }
-            }
+            self.arrange(&next_order);
             self.order = next_order;
         }
+        self.assign_gaps();
 
         let buttons = self
             .order
@@ -1871,6 +1907,117 @@ impl WorkspaceStrip {
             .map(|workspace| workspace.id.clone());
         self.pill.sync(buttons, active);
     }
+
+    /// Collapses a destroyed workspace's slot; it removes itself once closed.
+    fn depart(&self, id: String, view: WorkspaceButtonView) {
+        if !view.slot.is_mapped() || !animations_enabled() {
+            self.slots.remove(&view.slot);
+            return;
+        }
+        view.slot.set_can_target(false);
+        for class_name in ["active", "under-pill"] {
+            view.button.remove_css_class(class_name);
+        }
+        *view.hold.borrow_mut() = Some(self.pill.hold());
+        view.slot.set_reveal_child(false);
+        let full_width = f64::from(view.slot.width().max(1));
+        view.slot.add_tick_callback(move |slot, _| {
+            if slot.reveals_child() {
+                slot.set_opacity(1.0);
+                return glib::ControlFlow::Break;
+            }
+            let fraction = (f64::from(slot.width()) / full_width).clamp(0.0, 1.0);
+            slot.set_opacity(fraction * fraction);
+            glib::ControlFlow::Continue
+        });
+        self.leaving.borrow_mut().insert(id, view);
+    }
+
+    /// Puts live slots in `order`, leaving collapsing slots where they are
+    /// unless the live order itself changed.
+    fn arrange(&self, order: &[String]) {
+        let mut previous: Option<gtk::Revealer> = None;
+        for id in order {
+            let Some(view) = self.views.get(id) else {
+                continue;
+            };
+            if view.slot.parent().is_none() {
+                self.slots.insert_child_after(&view.slot, previous.as_ref());
+                if !view.slot.reveals_child() {
+                    *view.hold.borrow_mut() = Some(self.pill.hold());
+                    view.slot.set_reveal_child(true);
+                }
+            }
+            previous = Some(view.slot.clone());
+        }
+
+        let live = self.slot_children().filter(|slot| slot.reveals_child());
+        let in_order = live
+            .map(|slot| slot.child())
+            .eq(order.iter().filter_map(|id| {
+                Some(Some(
+                    self.views.get(id)?.button.clone().upcast::<gtk::Widget>(),
+                ))
+            }));
+        if !in_order {
+            let mut previous: Option<gtk::Revealer> = None;
+            for id in order {
+                if let Some(view) = self.views.get(id) {
+                    self.slots
+                        .reorder_child_after(&view.slot, previous.as_ref());
+                    previous = Some(view.slot.clone());
+                }
+            }
+        }
+    }
+
+    /// Every button after the first live one leads with the gap. A collapsing
+    /// slot ahead of all live ones trails the gap instead, so the space it
+    /// closes ends flush against the new first button.
+    fn assign_gaps(&self) {
+        let slots = self.slot_children().collect::<Vec<_>>();
+        let live = slots
+            .iter()
+            .map(|slot| slot.reveals_child())
+            .collect::<Vec<_>>();
+        for (slot, (start, end)) in slots.iter().zip(slot_gaps(&live, WORKSPACE_GAP)) {
+            if let Some(button) = slot.child() {
+                button.set_margin_start(start);
+                button.set_margin_end(end);
+            }
+        }
+    }
+
+    fn slot_children(&self) -> impl Iterator<Item = gtk::Revealer> {
+        std::iter::successors(self.slots.first_child(), |child| child.next_sibling())
+            .filter_map(|child| child.downcast::<gtk::Revealer>().ok())
+    }
+}
+
+/// Leading and trailing margins per slot, given which slots are live (the rest
+/// are collapsing). Every slot after the first live one leads with `gap`; a
+/// collapsing slot ahead of all live ones trails it instead, so the strip's
+/// total width is unchanged when a slot starts to leave and when it is gone.
+fn slot_gaps(live: &[bool], gap: i32) -> Vec<(i32, i32)> {
+    let mut live_before = false;
+    live.iter()
+        .enumerate()
+        .map(|(index, &is_live)| {
+            let margins = if is_live || live_before {
+                (if live_before { gap } else { 0 }, 0)
+            } else if live[index + 1..].contains(&true) {
+                (0, gap)
+            } else {
+                (0, 0)
+            };
+            live_before |= is_live;
+            margins
+        })
+        .collect()
+}
+
+fn animations_enabled() -> bool {
+    gtk::Settings::default().is_some_and(|settings| settings.is_gtk_enable_animations())
 }
 
 impl WorkspaceButtonView {
@@ -1878,6 +2025,8 @@ impl WorkspaceButtonView {
         spec: &WorkspaceButtonSpec,
         action_sender: Sender<ActionRequest>,
         output_name: String,
+        leaving: Weak<RefCell<BTreeMap<String, WorkspaceButtonView>>>,
+        opens: bool,
     ) -> Self {
         let button = gtk::Button::with_label(&spec.label);
         button.add_css_class("workspace-button");
@@ -1894,9 +2043,49 @@ impl WorkspaceButtonView {
                 },
             });
         });
+
+        let slot = gtk::Revealer::new();
+        slot.set_transition_type(gtk::RevealerTransitionType::SlideLeft);
+        slot.set_transition_duration(WORKSPACE_SLOT_MS);
+        // An opening slot starts closed; `arrange` reveals it once placed.
+        slot.set_reveal_child(!opens);
+        slot.set_child(Some(&button));
+        let hold = Rc::new(RefCell::new(None::<PillHold>));
+        let slot_hold = hold.clone();
+        let id = spec.id.clone();
+        slot.connect_child_revealed_notify(move |slot| {
+            if slot.is_child_revealed() != slot.reveals_child() {
+                return;
+            }
+            slot_hold.borrow_mut().take();
+            if slot.reveals_child() {
+                return;
+            }
+            // Detach outside the revealer's own animation tick.
+            let slot = slot.clone();
+            let leaving = leaving.clone();
+            let id = id.clone();
+            glib::idle_add_local_once(move || {
+                if slot.reveals_child() {
+                    return;
+                }
+                if let Some(parent) = slot.parent().and_downcast::<gtk::Box>() {
+                    parent.remove(&slot);
+                }
+                if let Some(leaving) = leaving.upgrade() {
+                    let mut leaving = leaving.borrow_mut();
+                    if leaving.get(&id).is_some_and(|view| view.slot == slot) {
+                        leaving.remove(&id);
+                    }
+                }
+            });
+        });
+
         let mut view = Self {
+            slot,
             button,
             spec: spec.clone(),
+            hold,
         };
         view.update(spec);
         view
@@ -2222,7 +2411,7 @@ fn apply_motion_style(
 }
 
 fn flash_class(widget: &impl IsA<gtk::Widget>, class_name: &str, duration_ms: u64) {
-    if !gtk::Settings::default().is_some_and(|settings| settings.is_gtk_enable_animations()) {
+    if !animations_enabled() {
         return;
     }
     let widget = widget.clone().upcast::<gtk::Widget>();
@@ -2625,6 +2814,41 @@ fn scroll_actions(module_id: SystemModuleId) -> Option<(ActionIntent, ActionInte
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn departing_slots_keep_the_strip_width_continuous() {
+        let total = |live: &[bool]| -> i32 {
+            super::slot_gaps(live, 8)
+                .iter()
+                .map(|(start, end)| start + end)
+                .sum()
+        };
+        assert_eq!(
+            super::slot_gaps(&[false, true, true], 8),
+            vec![(0, 8), (0, 0), (8, 0)]
+        );
+        for count in 1..6 {
+            let all_live = vec![true; count];
+            for leaving in 0..count {
+                let mut live = all_live.clone();
+                live[leaving] = false;
+                // Starting to leave moves nothing...
+                assert_eq!(
+                    total(&live),
+                    total(&all_live),
+                    "{count} slots, {leaving} leaves"
+                );
+                // ...and the collapsed slot took exactly its own gap with it.
+                let mut after = all_live.clone();
+                after.pop();
+                let leaving_gap = {
+                    let (start, end) = super::slot_gaps(&live, 8)[leaving];
+                    start + end
+                };
+                assert_eq!(total(&live) - leaving_gap, total(&after));
+            }
+        }
+    }
+
     use std::collections::BTreeMap;
 
     use crate::{

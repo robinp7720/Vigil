@@ -8,6 +8,10 @@
 //! not created yet, or off a button that just vanished. The strip then reserves
 //! room up to the pill's edge, so whatever follows it slides along with the
 //! pill instead of being painted over.
+//!
+//! When the strip reflows under a resting pill (a neighbouring button
+//! collapsing away), the pill moves rigidly with its button rather than
+//! springing after it.
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -49,10 +53,21 @@ pub struct WorkspacePill {
     state: Rc<PillState>,
 }
 
+/// Keeps the pill ticking while the strip animates its own layout.
+pub struct PillHold(Rc<PillState>);
+
+impl Drop for PillHold {
+    fn drop(&mut self) {
+        self.0.holds.set(self.0.holds.get().saturating_sub(1));
+    }
+}
+
 struct PillState {
     output_name: String,
     root: gtk::Overlay,
     strip: gtk::Box,
+    /// Distance between neighbouring buttons.
+    gap: f32,
     layer: gtk::Fixed,
     pill: gtk::Box,
     buttons: RefCell<Vec<(String, gtk::Button)>>,
@@ -60,17 +75,21 @@ struct PillState {
     motion: RefCell<Option<PillMotion>>,
     tick: RefCell<Option<gtk::TickCallbackId>>,
     last_frame_us: Cell<Option<i64>>,
+    holds: Cell<usize>,
 }
 
 struct PillMotion {
     x: Spring,
     width: Spring,
     tracking: bool,
+    /// The workspace and rect the pill was last heading to while at rest.
+    anchor: Option<(String, MorphRect)>,
 }
 
 impl WorkspacePill {
-    /// Wraps `strip` so the pill renders beneath its buttons.
-    pub fn new(strip: &gtk::Box, output_name: String) -> Self {
+    /// Wraps `strip` so the pill renders beneath its buttons, which sit `gap`
+    /// pixels apart.
+    pub fn new(strip: &gtk::Box, output_name: String, gap: f32) -> Self {
         let layer = gtk::Fixed::new();
         layer.set_can_target(false);
         let pill = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -95,6 +114,7 @@ impl WorkspacePill {
             output_name,
             root: root.clone(),
             strip: strip.clone(),
+            gap,
             layer,
             pill,
             buttons: RefCell::new(Vec::new()),
@@ -102,6 +122,7 @@ impl WorkspacePill {
             motion: RefCell::new(None),
             tick: RefCell::new(None),
             last_frame_us: Cell::new(None),
+            holds: Cell::new(0),
         });
         PILLS.with(|pills| pills.borrow_mut().push(Rc::downgrade(&state)));
         Self { root, state }
@@ -116,6 +137,13 @@ impl WorkspacePill {
         *self.state.buttons.borrow_mut() = buttons;
         *self.state.active.borrow_mut() = active;
         self.state.ensure_ticking();
+    }
+
+    /// Follows the buttons every frame until the returned hold drops.
+    pub fn hold(&self) -> PillHold {
+        self.state.holds.set(self.state.holds.get() + 1);
+        self.state.ensure_ticking();
+        PillHold(self.state.clone())
     }
 }
 
@@ -180,13 +208,13 @@ impl PillState {
             &rects,
             self.active.borrow().as_deref(),
             swipe.as_ref(),
-            self.strip.spacing() as f32,
+            self.gap,
         ) else {
             self.pill.set_visible(false);
             self.motion.take();
             self.reserve_width(None);
             update_class(&self.strip, "pill-moving", false);
-            return swipe.is_some();
+            return swipe.is_some() || self.holds.get() > 0;
         };
 
         let params = PILL_SPRING;
@@ -195,6 +223,7 @@ impl PillState {
             x: Spring::pixels(params, f64::from(target.rect.x)),
             width: Spring::pixels(params, f64::from(target.rect.width)),
             tracking: false,
+            anchor: None,
         });
 
         let x = f64::from(target.rect.x);
@@ -205,12 +234,29 @@ impl PillState {
             motion.x.snap(x);
             motion.width.snap(width);
         } else {
+            // Same workspace, new place: the strip reflowed, so carry the pill
+            // along instead of letting it trail its button.
+            let active = self.active.borrow();
+            if !motion.tracking
+                && let Some((anchor_id, anchor)) = motion.anchor.as_ref()
+                && active.as_deref() == Some(anchor_id.as_str())
+            {
+                motion.x.offset(f64::from(target.rect.x - anchor.x));
+                motion
+                    .width
+                    .offset(f64::from(target.rect.width - anchor.width));
+            }
             motion.x.retarget(x);
             motion.width.retarget(width);
             motion.x.advance(seconds);
             motion.width.advance(seconds);
         }
         motion.tracking = target.tracking;
+        motion.anchor = if target.tracking {
+            None
+        } else {
+            self.active.borrow().clone().map(|id| (id, target.rect))
+        };
 
         let rect = MorphRect::new(
             motion.x.value() as f32,
@@ -236,7 +282,7 @@ impl PillState {
         for (id, button) in self.buttons.borrow().iter() {
             update_class(button, "under-pill", under == Some(id.as_str()));
         }
-        moving
+        moving || self.holds.get() > 0
     }
 }
 
