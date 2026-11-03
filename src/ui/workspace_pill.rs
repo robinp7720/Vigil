@@ -3,6 +3,11 @@
 //! While a trackpad swipe is in flight the pill sits wherever the compositor's
 //! swipe progress puts it, frame by frame. Otherwise it springs to the active
 //! workspace.
+//!
+//! The pill can run past the strip's end: toward a workspace the compositor has
+//! not created yet, or off a button that just vanished. The strip then reserves
+//! room up to the pill's edge, so whatever follows it slides along with the
+//! pill instead of being painted over.
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -46,6 +51,7 @@ pub struct WorkspacePill {
 
 struct PillState {
     output_name: String,
+    root: gtk::Overlay,
     strip: gtk::Box,
     layer: gtk::Fixed,
     pill: gtk::Box,
@@ -81,10 +87,13 @@ impl WorkspacePill {
         root.add_overlay(&layer);
         root.add_overlay(strip);
         root.set_measure_overlay(strip, true);
+        // Reserved room past the pill stays empty rather than stretching the strip.
+        strip.set_halign(gtk::Align::Start);
         strip.add_css_class("has-pill");
 
         let state = Rc::new(PillState {
             output_name,
+            root: root.clone(),
             strip: strip.clone(),
             layer,
             pill,
@@ -175,6 +184,7 @@ impl PillState {
         ) else {
             self.pill.set_visible(false);
             self.motion.take();
+            self.reserve_width(None);
             update_class(&self.strip, "pill-moving", false);
             return swipe.is_some();
         };
@@ -213,6 +223,10 @@ impl PillState {
         self.pill
             .set_size_request(rect.width.round() as i32, rect.height.round() as i32);
         self.pill.set_visible(true);
+        self.reserve_width(reserved_width(
+            strip_origin.x() + self.strip.width() as f32,
+            rect.x + rect.width,
+        ));
 
         let moving = motion.tracking || !motion.x.is_settled() || !motion.width.is_settled();
         update_class(&self.strip, "pill-moving", moving);
@@ -224,6 +238,27 @@ impl PillState {
         }
         moving
     }
+}
+
+impl PillState {
+    /// Holds the strip's slot open to `width`, or releases it with `None`.
+    ///
+    /// A width request rather than an end margin: when the awaited workspace
+    /// button appears, the strip grows into the reserved room during layout,
+    /// before the next tick can recompute anything, so neighbours never jump.
+    fn reserve_width(&self, width: Option<i32>) {
+        let width = width.unwrap_or(-1);
+        if self.root.width_request() != width {
+            self.root.set_size_request(width, -1);
+        }
+    }
+}
+
+/// The width the strip's slot must span so the pill's trailing edge stays
+/// inside it, or `None` while the pill fits within the strip. Both edges are in
+/// the slot's coordinates.
+fn reserved_width(strip_end: f32, pill_end: f32) -> Option<i32> {
+    (pill_end - strip_end > 0.5).then(|| pill_end.ceil() as i32)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -347,6 +382,14 @@ mod tests {
             .expect("target");
         assert_eq!(target.rect, MorphRect::new(0.0, 0.0, 32.0, 28.0));
         assert!(!target.tracking);
+    }
+
+    #[test]
+    fn reserves_room_only_while_the_pill_runs_past_the_strip() {
+        assert_eq!(reserved_width(108.0, 108.0), None);
+        assert_eq!(reserved_width(108.0, 66.0), None);
+        assert_eq!(reserved_width(108.0, 108.4), None);
+        assert_eq!(reserved_width(108.0, 129.2), Some(130));
     }
 
     #[test]
