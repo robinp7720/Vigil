@@ -126,6 +126,11 @@ impl BarApplication {
     }
 
     pub fn run(self) {
+        // This desktop service must outlive its windows. The compositor snapshot
+        // and GDK monitors can arrive after activation, and output reconfiguration
+        // can temporarily remove every surface. Without a hold, GApplication
+        // shuts down before the update loop can create the replacement windows.
+        let _hold = self.application.hold();
         self.application.run_with_args(&["vigil"]);
         self.runtime.shutdown();
     }
