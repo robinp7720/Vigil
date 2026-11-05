@@ -213,6 +213,7 @@ mod tests {
                 (
                     "DP-4".to_string(),
                     OutputState {
+                        fullscreen: false,
                         name: "DP-4".to_string(),
                         workspaces: vec![
                             workspace("1", "web", "DP-4", false),
@@ -231,6 +232,7 @@ mod tests {
                 (
                     "DP-5".to_string(),
                     OutputState {
+                        fullscreen: false,
                         name: "DP-5".to_string(),
                         workspaces: vec![workspace("3", "chat", "DP-5", true)],
                         focused_window: Some(window("chat-1", Some("3"), "Signal", true)),

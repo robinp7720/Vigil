@@ -99,6 +99,7 @@ fn expected_initial_snapshot() -> Vec<StateUpdate> {
     vec![
         StateUpdate::Outputs(vec![
             OutputState {
+                fullscreen: false,
                 name: "DP-1".to_string(),
                 workspaces: vec![
                     WorkspaceState {
@@ -148,6 +149,7 @@ fn expected_initial_snapshot() -> Vec<StateUpdate> {
                 changed_at: 0,
             },
             OutputState {
+                fullscreen: false,
                 name: "DP-2".to_string(),
                 workspaces: vec![WorkspaceState {
                     id: "2".to_string(),
@@ -186,6 +188,7 @@ fn expected_transitions() -> Vec<StateUpdate> {
     vec![
         StateUpdate::Outputs(vec![
             OutputState {
+                fullscreen: false,
                 name: "DP-1".to_string(),
                 workspaces: vec![
                     WorkspaceState {
@@ -235,6 +238,7 @@ fn expected_transitions() -> Vec<StateUpdate> {
                 changed_at: 0,
             },
             OutputState {
+                fullscreen: false,
                 name: "DP-2".to_string(),
                 workspaces: vec![WorkspaceState {
                     id: "2".to_string(),
@@ -267,6 +271,7 @@ fn expected_transitions() -> Vec<StateUpdate> {
         StateUpdate::FocusedOutput(Some("DP-1".to_string())),
         StateUpdate::Outputs(vec![
             OutputState {
+                fullscreen: false,
                 name: "DP-1".to_string(),
                 workspaces: vec![
                     WorkspaceState {
@@ -316,6 +321,7 @@ fn expected_transitions() -> Vec<StateUpdate> {
                 changed_at: 0,
             },
             OutputState {
+                fullscreen: false,
                 name: "DP-2".to_string(),
                 workspaces: vec![WorkspaceState {
                     id: "2".to_string(),
@@ -347,6 +353,7 @@ fn expected_transitions() -> Vec<StateUpdate> {
         ]),
         StateUpdate::Outputs(vec![
             OutputState {
+                fullscreen: false,
                 name: "DP-1".to_string(),
                 workspaces: vec![
                     WorkspaceState {
@@ -396,6 +403,7 @@ fn expected_transitions() -> Vec<StateUpdate> {
                 changed_at: 0,
             },
             OutputState {
+                fullscreen: false,
                 name: "DP-2".to_string(),
                 workspaces: vec![WorkspaceState {
                     id: "2".to_string(),
@@ -427,6 +435,7 @@ fn expected_transitions() -> Vec<StateUpdate> {
         ]),
         StateUpdate::Outputs(vec![
             OutputState {
+                fullscreen: false,
                 name: "DP-1".to_string(),
                 workspaces: vec![
                     WorkspaceState {
@@ -476,6 +485,7 @@ fn expected_transitions() -> Vec<StateUpdate> {
                 changed_at: 0,
             },
             OutputState {
+                fullscreen: false,
                 name: "DP-2".to_string(),
                 workspaces: vec![WorkspaceState {
                     id: "2".to_string(),
@@ -507,6 +517,7 @@ fn expected_transitions() -> Vec<StateUpdate> {
         ]),
         StateUpdate::Outputs(vec![
             OutputState {
+                fullscreen: false,
                 name: "DP-1".to_string(),
                 workspaces: vec![
                     WorkspaceState {
@@ -556,6 +567,7 @@ fn expected_transitions() -> Vec<StateUpdate> {
                 changed_at: 0,
             },
             OutputState {
+                fullscreen: false,
                 name: "DP-2".to_string(),
                 workspaces: vec![WorkspaceState {
                     id: "2".to_string(),
@@ -740,6 +752,7 @@ fn compositor_hyprland_workspacev2_updates_same_output_activity() {
         adapter.next_update().expect("workspace update"),
         StateUpdate::Outputs(vec![
             OutputState {
+                fullscreen: false,
                 name: "DP-1".to_string(),
                 workspaces: vec![
                     WorkspaceState {
@@ -779,6 +792,7 @@ fn compositor_hyprland_workspacev2_updates_same_output_activity() {
                 changed_at: 0,
             },
             OutputState {
+                fullscreen: false,
                 name: "DP-2".to_string(),
                 workspaces: vec![WorkspaceState {
                     id: "2".to_string(),
@@ -856,6 +870,7 @@ fn compositor_hyprland_createworkspacev2_adds_new_workspace_to_focused_output() 
             .expect("workspace create update from workspacev2"),
         StateUpdate::Outputs(vec![
             OutputState {
+                fullscreen: false,
                 name: "DP-1".to_string(),
                 workspaces: vec![
                     WorkspaceState {
@@ -881,6 +896,7 @@ fn compositor_hyprland_createworkspacev2_adds_new_workspace_to_focused_output() 
                 changed_at: 0,
             },
             OutputState {
+                fullscreen: false,
                 name: "DP-2".to_string(),
                 workspaces: vec![WorkspaceState {
                     id: "2".to_string(),
@@ -937,6 +953,7 @@ fn compositor_hyprland_destroyworkspacev2_removes_workspace() {
         adapter.next_update().expect("workspace destroy update"),
         StateUpdate::Outputs(vec![
             OutputState {
+                fullscreen: false,
                 name: "DP-1".to_string(),
                 workspaces: vec![WorkspaceState {
                     id: "1".to_string(),
@@ -952,6 +969,7 @@ fn compositor_hyprland_destroyworkspacev2_removes_workspace() {
                 changed_at: 0,
             },
             OutputState {
+                fullscreen: false,
                 name: "DP-2".to_string(),
                 workspaces: vec![WorkspaceState {
                     id: "2".to_string(),
@@ -999,6 +1017,7 @@ fn compositor_niri_workspaces_changed_adds_and_removes_workspaces() {
         adapter.next_update().expect("workspaces changed update"),
         StateUpdate::Outputs(vec![
             OutputState {
+                fullscreen: false,
                 name: "DP-1".to_string(),
                 workspaces: vec![
                     WorkspaceState {
@@ -1024,6 +1043,7 @@ fn compositor_niri_workspaces_changed_adds_and_removes_workspaces() {
                 changed_at: 0,
             },
             OutputState {
+                fullscreen: false,
                 name: "DP-2".to_string(),
                 workspaces: vec![WorkspaceState {
                     id: "2".to_string(),
@@ -1075,6 +1095,7 @@ fn compositor_hyprland_clients_default_missing_urgent_to_false() {
         adapter.initial_snapshot().expect("hyprland snapshot"),
         vec![
             StateUpdate::Outputs(vec![OutputState {
+                fullscreen: false,
                 name: "DP-1".to_string(),
                 workspaces: vec![WorkspaceState {
                     id: "1".to_string(),
@@ -1484,4 +1505,83 @@ fn compositor_niri_accepts_name_keyed_cli_outputs_and_workspace_focus() {
         adapter.initial_snapshot().unwrap(),
         expected_initial_snapshot()
     );
+}
+
+#[test]
+fn compositor_fullscreen_tracks_visible_workspaces_and_ignores_maximized_windows() {
+    let mut snapshot: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/hyprland-snapshot.json")).unwrap();
+    snapshot["clients"][0]["fullscreen"] = 2.into();
+    snapshot["clients"][0]["workspace"]["id"] = 3.into();
+    snapshot["clients"][1]["fullscreen"] = 1.into();
+    let mut adapter = HyprlandAdapter::new_for_test(
+        &snapshot.to_string(),
+        "workspacev2>>3,3\nworkspacev2>>1,1\n",
+        |_, _, _| Ok(()),
+    );
+    let initial = adapter.initial_snapshot().unwrap();
+    let StateUpdate::Outputs(outputs) = &initial[0] else {
+        panic!("expected outputs");
+    };
+    assert!(outputs.iter().all(|output| !output.fullscreen));
+    let StateUpdate::Outputs(outputs) = adapter.next_update().unwrap() else {
+        panic!("expected workspace update");
+    };
+    assert!(outputs[0].fullscreen);
+    assert!(!outputs[1].fullscreen);
+    let StateUpdate::Outputs(outputs) = adapter.next_update().unwrap() else {
+        panic!("expected workspace update");
+    };
+    assert!(outputs.iter().all(|output| !output.fullscreen));
+}
+
+#[test]
+fn compositor_fullscreen_events_refresh_clients_instead_of_guessing_from_focus() {
+    let _env_guard = env_lock().lock().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let clients_path = directory.path().join("clients.json");
+    write_script(
+        &directory.path().join("hyprctl"),
+        "#!/bin/sh\n[ \"$1\" = -j ] && [ \"$2\" = clients ] || exit 1\ncat \"$VIGIL_TEST_CLIENTS\"\n",
+    );
+    let _path = EnvGuard::set(
+        "PATH",
+        &format!(
+            "{}:{}",
+            directory.path().display(),
+            std::env::var("PATH").unwrap()
+        ),
+    );
+    let _clients = EnvGuard::set("VIGIL_TEST_CLIENTS", clients_path.to_str().unwrap());
+    let snapshot: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/hyprland-snapshot.json")).unwrap();
+    let mut clients = snapshot["clients"].clone();
+    let mut adapter = HyprlandAdapter::new_for_test(
+        &snapshot.to_string(),
+        "fullscreen>>1\nfullscreen>>1\nclosewindow>>0x64\n",
+        |_, _, _| Ok(()),
+    );
+    adapter.initial_snapshot().unwrap();
+    // Focus is on DP-2, but the fullscreen change belongs to DP-1.
+    clients[0]["fullscreen"] = 2.into();
+    fs::write(&clients_path, clients.to_string()).unwrap();
+    let StateUpdate::Outputs(outputs) = adapter.next_update().unwrap() else {
+        panic!("expected fullscreen update");
+    };
+    assert!(outputs[0].fullscreen);
+    assert!(!outputs[1].fullscreen);
+    // A second enter event is not a toggle, and maximize is not fullscreen.
+    clients[1]["fullscreen"] = 3.into();
+    fs::write(&clients_path, clients.to_string()).unwrap();
+    let StateUpdate::Outputs(outputs) = adapter.next_update().unwrap() else {
+        panic!("expected fullscreen update");
+    };
+    assert!(outputs.iter().all(|output| output.fullscreen));
+    clients.as_array_mut().unwrap().remove(0);
+    clients[0]["fullscreen"] = 1.into();
+    fs::write(&clients_path, clients.to_string()).unwrap();
+    let StateUpdate::Outputs(outputs) = adapter.next_update().unwrap() else {
+        panic!("expected close update");
+    };
+    assert!(outputs.iter().all(|output| !output.fullscreen));
 }

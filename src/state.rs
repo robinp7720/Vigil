@@ -427,6 +427,7 @@ fn normalize_timers(
 
 fn output_semantically_equal(left: &OutputState, right: &OutputState) -> bool {
     left.name == right.name
+        && left.fullscreen == right.fullscreen
         && left.urgent == right.urgent
         && left.workspaces.len() == right.workspaces.len()
         && left
@@ -846,6 +847,7 @@ mod tests {
 
         assert!(store.apply(
             StateUpdate::Outputs(vec![OutputState {
+                fullscreen: false,
                 name: "DP-5".to_string(),
                 workspaces: vec![WorkspaceState {
                     id: "1".to_string(),

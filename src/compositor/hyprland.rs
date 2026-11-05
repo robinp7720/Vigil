@@ -212,6 +212,15 @@ impl HyprlandAdapter {
                 continue;
             }
 
+            // The fullscreen event has no window address. Refresh authoritative client
+            // state instead of guessing from focus (or treating repeated events as toggles).
+            if matches!(
+                trimmed.split_once(">>").map(|(event, _)| event),
+                Some("fullscreen" | "openwindow" | "closewindow")
+            ) {
+                let clients = read_hyprctl_json("clients").map_err(reconnect_error)?;
+                apply_clients(&mut self.tracker.state, clients);
+            }
             apply_event(
                 &mut self.tracker.state,
                 &mut self.pending,
@@ -263,6 +272,8 @@ struct HyprClient {
     urgent: bool,
     #[serde(default = "default_true")]
     mapped: bool,
+    #[serde(default)]
+    fullscreen: u8,
 }
 
 #[derive(Deserialize)]
@@ -333,19 +344,7 @@ fn apply_snapshot(
         );
     }
 
-    for client in snapshot.clients.into_iter().filter(|client| client.mapped) {
-        let window_id = super::normalize_window_id(&client.address);
-        state.windows.insert(
-            window_id.clone(),
-            RawWindow {
-                id: window_id,
-                app_id: client.class,
-                title: client.title.unwrap_or_default(),
-                workspace_id: Some(client.workspace.id.to_string()),
-                urgent: client.urgent,
-            },
-        );
-    }
+    apply_clients(state, snapshot.clients);
 
     let mut keyboards = snapshot.devices.keyboards;
     let keyboard = keyboards
@@ -357,6 +356,24 @@ fn apply_snapshot(
         state.keyboard_layout = keyboard_layout_state(keyboard);
     }
     Ok(keyboard.map(|keyboard| keyboard.name))
+}
+
+fn apply_clients(state: &mut NormalizedState, clients: Vec<HyprClient>) {
+    state.windows.clear();
+    for client in clients.into_iter().filter(|client| client.mapped) {
+        let window_id = super::normalize_window_id(&client.address);
+        state.windows.insert(
+            window_id.clone(),
+            RawWindow {
+                id: window_id,
+                fullscreen: client.fullscreen & 2 != 0,
+                app_id: client.class,
+                title: client.title.unwrap_or_default(),
+                workspace_id: Some(client.workspace.id.to_string()),
+                urgent: client.urgent,
+            },
+        );
+    }
 }
 
 fn keyboard_layout_state(keyboard: &HyprKeyboard) -> KeyboardLayoutState {

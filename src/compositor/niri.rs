@@ -365,6 +365,7 @@ fn apply_snapshot(
         state.windows.insert(
             window.id.to_string(),
             RawWindow {
+                fullscreen: false,
                 id: window.id.to_string(),
                 app_id: window.app_id,
                 title: window.title.unwrap_or_default(),
@@ -621,6 +622,7 @@ fn apply_window_event(
         tracker.state.windows.insert(
             window_id.clone(),
             RawWindow {
+                fullscreen: false,
                 id: window_id.clone(),
                 app_id: next_app_id.clone(),
                 title: next_title,

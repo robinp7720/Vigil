@@ -263,6 +263,7 @@ fn preview_snapshot(connectors: &[String], scenario: &str, now_epoch: i64) -> cr
             (
                 connector.clone(),
                 crate::OutputState {
+                    fullscreen: false,
                     name: connector.clone(),
                     workspaces,
                     windows: vec![window.clone()],

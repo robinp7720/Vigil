@@ -397,6 +397,7 @@ struct NotificationStackHandle {
     notifications: Vec<Notification>,
     width: i32,
     output: String,
+    fullscreen: bool,
 }
 
 #[derive(Default)]
@@ -544,6 +545,10 @@ impl SurfaceRegistry {
         let Some(monitor) = monitors.get(focused_output) else {
             return;
         };
+        let fullscreen = snapshot
+            .outputs
+            .get(focused_output)
+            .is_some_and(|output| output.fullscreen);
         let monitor_width = monitor.geometry().width();
         let width = notification_stack_width(monitor_width);
         let stage_width = width + TOAST_STAGE_PAD * 2;
@@ -553,20 +558,19 @@ impl SurfaceRegistry {
         };
         let origin = stage::toast_origin(island, monitor_width, stage_width);
 
-        // Output or width changes rebuild the stack without motion.
-        let stale = self
-            .notification_stack
-            .as_ref()
-            .is_some_and(|stack| stack.output != focused_output || stack.width != width);
+        // Output, width, or placement changes rebuild the stack without motion.
+        let stale = self.notification_stack.as_ref().is_some_and(|stack| {
+            stack.output != focused_output || stack.width != width || stack.fullscreen != fullscreen
+        });
         if stale && let Some(stack) = self.notification_stack.take() {
             stack.window.close();
         }
         if notifications.is_empty() && self.notification_stack.is_none() {
             return;
         }
-        let animate = !stale;
+        let animate = !stale && !fullscreen;
         let stack = self.notification_stack.get_or_insert_with(|| {
-            new_notification_stack(application, monitor, width, focused_output)
+            new_notification_stack(application, monitor, width, focused_output, fullscreen)
         });
 
         let changes = toast_changes(&stack.notifications, &notifications);
@@ -884,6 +888,7 @@ fn new_notification_stack(
     monitor: &gdk::Monitor,
     width: i32,
     output: &str,
+    fullscreen: bool,
 ) -> NotificationStackHandle {
     let stage_width = width + TOAST_STAGE_PAD * 2;
     let window = gtk::ApplicationWindow::builder()
@@ -896,18 +901,26 @@ fn new_notification_stack(
     window.init_layer_shell();
     window.set_namespace(Some("vigil-notifications"));
     window.set_layer(Layer::Overlay);
-    // A transparent, full-height stage centered under the island: toasts morph out of
-    // the island within it, and the input region covers only the cards below the bar.
+    // A transparent, full-height stage. Fullscreen toasts sit at the top-right
+    // edge; otherwise they morph out of the island below the bar.
     window.set_anchor(Edge::Top, true);
     window.set_anchor(Edge::Bottom, true);
-    window.set_margin(Edge::Top, stage::style().surface_margin);
+    window.set_anchor(Edge::Right, fullscreen);
+    window.set_margin(
+        Edge::Top,
+        if fullscreen {
+            0
+        } else {
+            stage::style().surface_margin
+        },
+    );
     window.set_margin(Edge::Bottom, stage::style().surface_margin);
     window.set_exclusive_zone(-1);
     window.set_monitor(Some(monitor));
     let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
     content.add_css_class("notification-stack");
     content.set_valign(gtk::Align::Start);
-    content.set_margin_top(stage::toast_top_in_stage());
+    content.set_margin_top(stage::toast_top_in_stage(fullscreen));
     content.set_margin_start(TOAST_STAGE_PAD);
     content.set_margin_end(TOAST_STAGE_PAD);
     content.set_margin_bottom(24);
@@ -925,7 +938,9 @@ fn new_notification_stack(
             let mut child = content.first_child();
             while let Some(widget) = child {
                 if let Some(morph) = widget.downcast_ref::<MorphBin>()
-                    && let Some(shape) = morph.shape_in(&window).and_then(stage::toast_input_shape)
+                    && let Some(shape) = morph
+                        .shape_in(&window)
+                        .and_then(|shape| stage::toast_input_shape(shape, fullscreen))
                 {
                     shapes.push(shape);
                 }
@@ -942,6 +957,7 @@ fn new_notification_stack(
         notifications: Vec::new(),
         width,
         output: output.to_string(),
+        fullscreen,
     }
 }
 
@@ -3475,6 +3491,7 @@ mod tests {
         urgent: bool,
     ) -> OutputState {
         OutputState {
+            fullscreen: false,
             name: name.to_string(),
             workspaces: workspaces.to_vec(),
             windows: focused_window.iter().cloned().collect(),

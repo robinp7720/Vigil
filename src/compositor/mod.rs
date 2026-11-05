@@ -138,6 +138,7 @@ pub(crate) struct RawWorkspace {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RawWindow {
     pub id: String,
+    pub fullscreen: bool,
     pub app_id: Option<String>,
     pub title: String,
     pub workspace_id: Option<String>,
@@ -219,7 +220,18 @@ impl NormalizedState {
                         })
                         .any(|window| window.urgent);
 
+                let fullscreen = self.windows.values().any(|window| {
+                    window.fullscreen
+                        && window
+                            .workspace_id
+                            .as_ref()
+                            .and_then(|id| self.workspaces.get(id))
+                            .is_some_and(|workspace| {
+                                workspace.output == output.name && workspace.active
+                            })
+                });
                 OutputState {
+                    fullscreen,
                     name: output.name.clone(),
                     workspaces,
                     windows,

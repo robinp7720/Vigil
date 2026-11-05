@@ -170,8 +170,10 @@ Vigil owns `org.freedesktop.Notifications`. New notifications grow out of the
 center island into a measured three-card stack at the top center of the focused
 output while the island keeps its current context. Outputs without a center
 island grow toasts from a top-center pill. Notifications remain searchable in a richer
-seven-day/100-item inbox. Toast timeouts pause on hover; critical notifications
-remain visible until dismissed.
+seven-day/100-item inbox. On Hyprland, fullscreen windows move toasts to the
+top-right edge with no top margin or island morph; leaving fullscreen restores
+the normal below-bar placement. Maximized windows keep the normal placement.
+Toast timeouts pause on hover; critical notifications remain visible until dismissed.
 
 Open the notification status button to mark the inbox read. Right-click it to
 toggle Do Not Disturb. DND queues low and normal notifications silently while

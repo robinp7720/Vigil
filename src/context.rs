@@ -870,6 +870,7 @@ mod tests {
         snapshot.outputs.insert(
             "DP-5".to_string(),
             OutputState {
+                fullscreen: false,
                 name: "DP-5".to_string(),
                 workspaces: Vec::new(),
                 windows: vec![WindowState {
@@ -916,6 +917,7 @@ mod tests {
         snapshot.outputs.insert(
             "DP-5".to_string(),
             OutputState {
+                fullscreen: false,
                 name: "DP-5".to_string(),
                 workspaces: Vec::new(),
                 windows: Vec::new(),
@@ -1167,6 +1169,7 @@ mod tests {
             self.snapshot.outputs.insert(
                 "DP-5".to_string(),
                 OutputState {
+                    fullscreen: false,
                     name: "DP-5".to_string(),
                     workspaces: Vec::new(),
                     windows: vec![WindowState {

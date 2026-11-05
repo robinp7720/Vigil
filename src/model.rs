@@ -82,6 +82,9 @@ pub enum StateUpdate {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputState {
     pub name: String,
+    /// A fullscreen window covers an active workspace on this output.
+    #[serde(default)]
+    pub fullscreen: bool,
     pub workspaces: Vec<WorkspaceState>,
     #[serde(default)]
     pub windows: Vec<WindowState>,

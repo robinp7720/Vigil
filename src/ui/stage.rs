@@ -40,8 +40,12 @@ pub fn panel_available_height(monitor_height: i32) -> i32 {
         .max(1)
 }
 
-pub fn toast_top_in_stage() -> i32 {
-    BAR_HEIGHT + NOTIFICATION_GAP
+pub fn toast_top_in_stage(fullscreen: bool) -> i32 {
+    if fullscreen {
+        0
+    } else {
+        BAR_HEIGHT + NOTIFICATION_GAP
+    }
 }
 
 pub fn control_center_stage_width(
@@ -76,9 +80,10 @@ pub fn origin_stage_width(requested: i32, allocated: Option<i32>) -> i32 {
 }
 
 /// Clips a toast's input shape to the stage area below the bar, so the stage never takes
-/// input over the island while a toast morphs out of or back into it.
-pub fn toast_input_shape(shape: MorphRect) -> Option<MorphRect> {
-    let top = toast_top_in_stage() as f32;
+/// input over the island while a toast morphs out of or back into it. In fullscreen,
+/// the bar is covered and the whole card must accept input, including its top edge.
+pub fn toast_input_shape(shape: MorphRect, fullscreen: bool) -> Option<MorphRect> {
+    let top = toast_top_in_stage(fullscreen) as f32;
     let bottom = shape.y + shape.height;
     shape.intersection(MorphRect::new(
         shape.x,
@@ -201,7 +206,7 @@ mod tests {
     #[test]
     fn stage_offsets_keep_previous_absolute_positions() {
         assert_eq!(style().surface_margin + panel_top_in_stage(), 54);
-        assert_eq!(style().surface_margin + toast_top_in_stage(), 59);
+        assert_eq!(style().surface_margin + toast_top_in_stage(false), 59);
     }
 
     #[test]
@@ -234,18 +239,25 @@ mod tests {
 
     #[test]
     fn toast_input_stays_below_the_bar() {
-        let top = toast_top_in_stage() as f32;
+        let top = toast_top_in_stage(false) as f32;
         let arriving = MorphRect::new(0.0, 4.0, 400.0, 80.0);
         assert_eq!(
-            toast_input_shape(arriving),
+            toast_input_shape(arriving, false),
             Some(MorphRect::new(0.0, top, 400.0, 84.0 - top))
         );
         assert_eq!(
-            toast_input_shape(MorphRect::new(0.0, 4.0, 160.0, 36.0)),
+            toast_input_shape(MorphRect::new(0.0, 4.0, 160.0, 36.0), false),
             None
         );
         let settled = MorphRect::new(0.0, top, 400.0, 90.0);
-        assert_eq!(toast_input_shape(settled), Some(settled));
+        assert_eq!(toast_input_shape(settled, false), Some(settled));
+    }
+
+    #[test]
+    fn fullscreen_toasts_start_at_the_edge_and_remain_clickable_above_bar_height() {
+        assert_eq!(toast_top_in_stage(true), 0);
+        let card = MorphRect::new(16.0, 0.0, 400.0, 90.0);
+        assert_eq!(toast_input_shape(card, true), Some(card));
     }
 
     #[test]
