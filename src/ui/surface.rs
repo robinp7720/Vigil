@@ -28,7 +28,7 @@ use super::control_center::{
 use super::morph::{self, MorphRect};
 use super::morph_bin::{MorphBin, MorphOrigin, MorphShadow};
 use super::popovers::PopoverCoordinator;
-use super::stage::{self, BAR_HEIGHT};
+use super::stage::{self, BAR_HEIGHT, TOAST_STAGE_PAD};
 use super::system::{SystemButtonSpec, SystemCluster, SystemModuleId, build_system_cluster};
 use super::wm::{WindowGroupSpec, select_primary_output, title_for_output, window_groups};
 use super::workspace_pill::{PillHold, WorkspacePill};
@@ -881,8 +881,6 @@ fn toast_render_key(notification: &Notification) -> Notification {
     }
 }
 
-const TOAST_STAGE_PAD: i32 = 16;
-
 fn new_notification_stack(
     application: &gtk::Application,
     monitor: &gdk::Monitor,
@@ -902,7 +900,8 @@ fn new_notification_stack(
     window.set_namespace(Some("vigil-notifications"));
     window.set_layer(Layer::Overlay);
     // A transparent, full-height stage. Fullscreen toasts sit at the top-right
-    // edge; otherwise they morph out of the island below the bar.
+    // with equal top/right card insets; otherwise they morph out of the island
+    // below the bar.
     window.set_anchor(Edge::Top, true);
     window.set_anchor(Edge::Bottom, true);
     window.set_anchor(Edge::Right, fullscreen);

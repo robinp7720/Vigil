@@ -9,6 +9,8 @@ use super::morph::MorphRect;
 
 pub const BAR_HEIGHT: i32 = 44;
 pub const NOTIFICATION_GAP: i32 = 10;
+/// Shared clearance around the notification cards, including fullscreen edge insets.
+pub const TOAST_STAGE_PAD: i32 = 16;
 
 thread_local! {
     static STYLE: std::cell::Cell<crate::config::StyleConfig> = std::cell::Cell::new(crate::config::StyleConfig::default());
@@ -42,7 +44,7 @@ pub fn panel_available_height(monitor_height: i32) -> i32 {
 
 pub fn toast_top_in_stage(fullscreen: bool) -> i32 {
     if fullscreen {
-        0
+        TOAST_STAGE_PAD
     } else {
         BAR_HEIGHT + NOTIFICATION_GAP
     }
@@ -254,9 +256,10 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_toasts_start_at_the_edge_and_remain_clickable_above_bar_height() {
-        assert_eq!(toast_top_in_stage(true), 0);
-        let card = MorphRect::new(16.0, 0.0, 400.0, 90.0);
+    fn fullscreen_toasts_share_edge_padding_and_remain_clickable_above_bar_height() {
+        assert_eq!(toast_top_in_stage(true), TOAST_STAGE_PAD);
+        let pad = TOAST_STAGE_PAD as f32;
+        let card = MorphRect::new(pad, pad, 400.0, 90.0);
         assert_eq!(toast_input_shape(card, true), Some(card));
     }
 
