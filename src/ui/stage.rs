@@ -50,16 +50,9 @@ pub fn toast_top_in_stage(fullscreen: bool) -> i32 {
     }
 }
 
-pub fn control_center_stage_width(
-    panel_width: i32,
-    origin: Option<MorphRect>,
-    monitor_width: i32,
-) -> i32 {
+pub fn control_center_stage_width(panel_width: i32, monitor_width: i32) -> i32 {
     let available = (monitor_width - style().surface_margin * 2).max(1);
-    let reach = origin.map_or(panel_width, |origin| {
-        panel_width.max(monitor_width - style().surface_margin - origin.x.floor() as i32)
-    });
-    reach.clamp(1, available)
+    panel_width.clamp(1, available)
 }
 
 /// The stage's size request: it may shrink only while hidden, and grows whenever more
@@ -93,15 +86,6 @@ pub fn toast_input_shape(shape: MorphRect, fullscreen: bool) -> Option<MorphRect
         shape.width,
         (bottom - top).max(0.0),
     ))
-}
-
-/// Maps a monitor-space rectangle directly into `panel_morph`'s local coordinates.
-/// Because the panel is top-right aligned (`halign = End`, with the configured panel margin), its monitor
-/// position depends only on `monitor_width` and `panel_width`, never on async stage resizes.
-pub fn monitor_to_panel_local(rect: MorphRect, monitor_width: i32, panel_width: i32) -> MorphRect {
-    let panel_left = monitor_width - style().surface_margin - style().panel_margin - panel_width;
-    let panel_top = style().surface_margin + panel_top_in_stage();
-    rect.translated(-panel_left as f32, -panel_top as f32)
 }
 
 /// A stage anchored top-right with the configured surface margin margins.
@@ -187,10 +171,6 @@ mod tests {
             bar_to_monitor(MorphRect::new(100.0, 4.0, 30.0, 28.0)),
             MorphRect::new(100.0, 4.0, 30.0, 28.0)
         );
-        assert_eq!(
-            monitor_to_panel_local(MorphRect::new(2300.0, 9.0, 30.0, 28.0), 2560, 480),
-            MorphRect::new(220.0, -35.0, 30.0, 28.0)
-        );
         assert_eq!(panel_available_height(800), 756);
         assert_eq!(panel_available_height(20), 1);
         configure(defaults);
@@ -212,14 +192,10 @@ mod tests {
     }
 
     #[test]
-    fn control_center_stage_widens_to_reach_the_origin() {
-        assert_eq!(control_center_stage_width(512, None, 2560), 512);
-        let near = MorphRect::new(2300.0, 9.0, 30.0, 28.0);
-        assert_eq!(control_center_stage_width(512, Some(near), 2560), 512);
-        let far = MorphRect::new(1900.0, 9.0, 30.0, 28.0);
-        assert_eq!(control_center_stage_width(512, Some(far), 2560), 655);
-        let beyond = MorphRect::new(-50.0, 9.0, 30.0, 28.0);
-        assert_eq!(control_center_stage_width(512, Some(beyond), 1000), 990);
+    fn control_center_stage_fits_the_panel_and_monitor() {
+        assert_eq!(control_center_stage_width(512, 2560), 512);
+        assert_eq!(control_center_stage_width(512, 400), 390);
+        assert_eq!(control_center_stage_width(512, 0), 1);
     }
 
     #[test]
@@ -269,10 +245,6 @@ mod tests {
         assert_eq!(
             monitor_to_top_right_stage(rect, 2560, 512),
             MorphRect::new(257.0, 4.0, 30.0, 28.0)
-        );
-        assert_eq!(
-            monitor_to_panel_local(rect, 2560, 480),
-            MorphRect::new(253.0, -45.0, 30.0, 28.0)
         );
     }
 

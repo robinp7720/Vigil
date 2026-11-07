@@ -37,7 +37,7 @@ use super::artwork::{
     ArtworkRequest, prefer_artwork_candidate, result_is_current, spawn_artwork_loader,
 };
 use super::morph::MorphRect;
-use super::morph_bin::{MorphBin, MorphOrigin, MorphShadow};
+use super::morph_bin::{MorphBin, MorphShadow};
 use super::stage;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -654,7 +654,7 @@ impl NavigationUi {
     }
 
     /// Switches immediately to `page` without an inner crossfade; used when opening or
-    /// switching pages from a topbar click so the entire popup grows as one unit.
+    /// switching pages from a topbar click without replaying the panel entrance.
     fn snap_to(&self, page: ControlCenterFocus) {
         self.page.set(page);
         self.return_origin.set(None);
@@ -835,7 +835,6 @@ struct ControlCenterMotion {
     root: glib::WeakRef<gtk::Box>,
     panel: glib::WeakRef<MorphBin>,
     phase: Cell<ControlCenterMotionPhase>,
-    origin: Cell<MorphOrigin>,
     dismiss_windows: RefCell<Vec<gtk::ApplicationWindow>>,
 }
 
@@ -846,7 +845,6 @@ impl ControlCenterMotion {
             root: root.downgrade(),
             panel: panel.downgrade(),
             phase: Cell::new(ControlCenterMotionPhase::Hidden),
-            origin: Cell::new(MorphOrigin::Scaled(0.92)),
             dismiss_windows: RefCell::new(Vec::new()),
         }
     }
@@ -911,15 +909,9 @@ impl ControlCenterMotion {
         }
     }
 
-    fn present(self: &Rc<Self>, origin: MorphOrigin) {
+    fn present(self: &Rc<Self>) {
         let current = self.phase.get();
-        let retargeting_visible =
-            current == ControlCenterMotionPhase::Visible && self.origin.get() != origin;
-        let next = if retargeting_visible {
-            ControlCenterMotionPhase::Entering
-        } else {
-            current.transition(ControlCenterMotionEvent::Present)
-        };
+        let next = current.transition(ControlCenterMotionEvent::Present);
         if next == current {
             return;
         }
@@ -932,19 +924,15 @@ impl ControlCenterMotion {
         };
         self.show_dismiss_windows(&window);
         root.set_sensitive(true);
-        self.origin.set(origin);
         if !animations_enabled() {
             panel.cancel();
             self.phase.set(ControlCenterMotionPhase::Visible);
             window.present();
             return;
         }
-        if retargeting_visible {
-            panel.cancel();
-        }
         self.phase.set(next);
         window.present();
-        panel.expand_from(origin, false, || {});
+        panel.slide(true);
         let motion = Rc::downgrade(self);
         panel.on_settled(move || {
             if let Some(motion) = motion.upgrade() {
@@ -962,7 +950,7 @@ impl ControlCenterMotion {
         self.dismiss_then(|| {});
     }
 
-    /// Collapses back into the origin, then runs `after` once the panel is hidden.
+    /// Slides up, then runs `after` once the panel is hidden.
     fn dismiss_then(self: &Rc<Self>, after: impl FnOnce() + 'static) {
         let current = self.phase.get();
         let next = current.transition(ControlCenterMotionEvent::Dismiss);
@@ -985,7 +973,7 @@ impl ControlCenterMotion {
             return;
         }
         self.phase.set(next);
-        panel.collapse_into(self.origin.get(), false, || {});
+        panel.slide(false);
         let motion = Rc::downgrade(self);
         panel.on_settled(move || {
             if let Some(motion) = motion.upgrade() {
@@ -1032,18 +1020,6 @@ impl ControlCenterMotion {
             window.close();
         }
     }
-}
-
-/// Converts a monitor-space origin into `panel_morph` local coordinates, falling back to a
-/// centered scale when no button origin is available.
-fn panel_origin(origin: Option<MorphRect>, monitor_width: i32, panel_width: i32) -> MorphOrigin {
-    origin.map_or(MorphOrigin::Scaled(0.92), |rect| {
-        MorphOrigin::Local(stage::monitor_to_panel_local(
-            rect,
-            monitor_width,
-            panel_width,
-        ))
-    })
 }
 
 fn animations_enabled() -> bool {
@@ -1913,8 +1889,8 @@ impl ControlCenterView {
         self.present_from(None);
     }
 
-    /// Opens the panel growing out of `origin` (monitor-logical coordinates).
-    pub fn present_from(&self, origin: Option<MorphRect>) {
+    /// Opens at full size beneath the bar. The origin is retained for caller compatibility.
+    pub fn present_from(&self, _origin: Option<MorphRect>) {
         let monitor_width = self
             .window
             .monitor()
@@ -1929,19 +1905,18 @@ impl ControlCenterView {
         };
         let stage_panel_width =
             measured_outer_width.max(panel_width + stage::style().panel_margin * 2);
-        let needed = stage::control_center_stage_width(stage_panel_width, origin, monitor_width);
+        let needed = stage::control_center_stage_width(stage_panel_width, monitor_width);
         let visible = self.window.is_visible();
         let current_request = self.stage_box.width_request();
         let request = stage::stage_width_request(current_request, needed, visible);
         if request != current_request {
             self.stage_box.set_size_request(request, -1);
             if !visible {
-                // Otherwise a hidden window keeps a wider earlier size and offsets origins.
+                // Discard a wider allocation retained from an earlier presentation.
                 self.window.set_default_size(request, -1);
             }
         }
-        self.motion
-            .present(panel_origin(origin, monitor_width, panel_width));
+        self.motion.present();
         sync_bluetooth_discovery(
             &self.timer_sender,
             &self.current,
@@ -3368,20 +3343,6 @@ mod tests {
     }
 
     #[test]
-    fn panel_stage_origin_falls_back_in_order() {
-        use super::panel_origin;
-        use crate::ui::morph::MorphRect;
-        use crate::ui::morph_bin::MorphOrigin;
-
-        let button = MorphRect::new(2300.0, 9.0, 30.0, 28.0);
-        assert_eq!(
-            panel_origin(Some(button), 2560, 480),
-            MorphOrigin::Local(MorphRect::new(253.0, -45.0, 30.0, 28.0))
-        );
-        assert_eq!(panel_origin(None, 2560, 480), MorphOrigin::Scaled(0.92));
-    }
-
-    #[test]
     fn control_center_motion_reopens_during_exit() {
         let phase = ControlCenterMotionPhase::Visible
             .transition(ControlCenterMotionEvent::Dismiss)
@@ -3389,6 +3350,16 @@ mod tests {
 
         assert_eq!(phase, ControlCenterMotionPhase::Entering);
         assert!(phase.is_presented());
+    }
+
+    #[test]
+    fn opening_another_section_does_not_replay_the_entrance() {
+        for phase in [
+            ControlCenterMotionPhase::Entering,
+            ControlCenterMotionPhase::Visible,
+        ] {
+            assert_eq!(phase.transition(ControlCenterMotionEvent::Present), phase);
+        }
     }
 
     #[test]

@@ -5,8 +5,8 @@ use std::cell::{Cell, RefCell};
 use gtk4::{self as gtk, gdk, glib, graphene, gsk, prelude::*, subclass::prelude::*};
 
 use super::morph::{
-    self, MorphRect, Spring, SpringParams, content_scales, fade_in, fade_out, genie_pinch,
-    genie_slice_span, morph_bounce_rect,
+    self, MorphRect, PanelSlide, Spring, SpringParams, content_scales, fade_in, fade_out,
+    genie_pinch, genie_slice_span, morph_bounce_rect,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -104,6 +104,7 @@ mod imp {
         pub(super) radius: Cell<f32>,
         pub(super) shadow: Cell<Option<MorphShadow>>,
         pub(super) transform: RefCell<Option<Transform>>,
+        pub(super) slide: RefCell<Option<PanelSlide>>,
         pub(super) transform_texture: RefCell<Option<(MorphRect, gdk::Texture)>>,
         pub(super) ghost: RefCell<Option<Ghost>>,
         pub(super) crossfade: RefCell<Option<Spring>>,
@@ -126,6 +127,7 @@ mod imp {
             }
             self.settled.take();
             self.transform.take();
+            self.slide.take();
             self.transform_texture.take();
             self.ghost.take();
             self.crossfade.take();
@@ -247,6 +249,18 @@ mod imp {
                 return;
             }
             let bounds = MorphRect::new(0.0, 0.0, obj.width() as f32, obj.height() as f32);
+            if let Some(slide) = self.slide.borrow().as_ref() {
+                // Clip at the resting top edge so the panel emerges beneath the bar.
+                snapshot.push_clip(&to_graphene(bounds));
+                snapshot.push_opacity(slide.opacity());
+                snapshot.save();
+                snapshot.translate(&graphene::Point::new(0.0, slide.shape(bounds).y));
+                self.snapshot_child(snapshot);
+                snapshot.restore();
+                snapshot.pop();
+                snapshot.pop();
+                return;
+            }
             // Resolve (and possibly cache) before any transform borrow is held for drawing.
             let endpoints = self.endpoints(bounds);
             match (self.transform.borrow().as_ref(), endpoints) {
@@ -271,6 +285,11 @@ mod imp {
 
         pub(super) fn is_animating(&self) -> bool {
             self.is_resizing()
+                || self
+                    .slide
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|slide| !slide.is_settled())
                 || self
                     .transform
                     .borrow()
@@ -318,6 +337,9 @@ mod imp {
         }
 
         fn advance(&self, seconds: f64) {
+            if let Some(slide) = self.slide.borrow_mut().as_mut() {
+                slide.advance(seconds);
+            }
             let layout = layout_params();
             let primary = params();
             let cross = cross_params();
@@ -341,6 +363,7 @@ mod imp {
 
         pub(super) fn complete(&self) {
             self.transform.take();
+            self.slide.take();
             self.transform_texture.take();
             self.ghost.take();
             self.crossfade.take();
@@ -416,6 +439,9 @@ mod imp {
         /// The currently visible shape in local coordinates.
         pub(super) fn current_shape(&self) -> MorphRect {
             let bounds = self.bounds();
+            if let Some(slide) = self.slide.borrow().as_ref() {
+                return slide.shape(bounds);
+            }
             let Some((from, to)) = self.endpoints(bounds) else {
                 return bounds;
             };
@@ -455,6 +481,7 @@ mod imp {
                 *self.height.borrow_mut() = None;
             }
             self.transform.take();
+            self.slide.take();
             self.transform_texture.take();
             self.ghost.take();
             self.crossfade.take();
@@ -793,6 +820,7 @@ impl MorphBin {
             self.queue_resize();
             return;
         }
+        imp.slide.take();
         let ghost = imp.capture();
         mutate();
         let Some(ghost) = ghost else {
@@ -808,6 +836,25 @@ impl MorphBin {
         } else {
             self.queue_draw();
         }
+    }
+
+    /// Slides at full size with a short fade; independent of the morph style.
+    pub fn slide(&self, opening: bool) {
+        let imp = imp_with_cleared_callback(self);
+        if !animations_enabled() {
+            imp.halt();
+            self.queue_draw();
+            return;
+        }
+        let mut slide = imp.slide.take().unwrap_or_else(|| PanelSlide::new(opening));
+        slide.retarget(opening);
+        imp.transform.take();
+        imp.transform_texture.take();
+        imp.ghost.take();
+        imp.crossfade.take();
+        *imp.slide.borrow_mut() = Some(slide);
+        imp.ensure_ticking();
+        self.queue_draw();
     }
 
     pub fn expand_from(&self, origin: MorphOrigin, capture: bool, mutate: impl FnOnce()) {
@@ -832,6 +879,7 @@ impl MorphBin {
             self.queue_resize();
             return;
         }
+        imp.slide.take();
         // Interrupting a transform continues from the shape currently on screen, with
         // the spring velocity kept (same direction) or reversed (opposite direction) so
         // momentum stays continuous.
@@ -931,5 +979,44 @@ mod measure_width_tests {
     fn following_width_never_below_natural() {
         assert_eq!(child_measure_width(100, 480, Some((50, 433))), 433);
         assert_eq!(child_measure_width(-1, 0, Some((50, 433))), -1);
+    }
+}
+
+#[cfg(test)]
+mod slide_tests {
+    use super::*;
+    use std::rc::Rc;
+
+    #[test]
+    #[ignore = "requires a GTK display; run separately with --ignored"]
+    fn reduced_motion_and_cancel_clear_pending_slide_callbacks() {
+        gtk::init().expect("GTK display");
+        let settings = gtk::Settings::default().unwrap();
+        settings.set_gtk_enable_animations(true);
+        let panel = MorphBin::new();
+        let obsolete = Rc::new(Cell::new(false));
+        panel.slide(true);
+        let called = obsolete.clone();
+        panel.on_settled(move || called.set(true));
+        assert!(panel.is_animating());
+        panel.cancel();
+        assert!(!panel.is_animating());
+        assert!(!obsolete.get());
+
+        panel.slide(true);
+        let called = obsolete.clone();
+        panel.on_settled(move || called.set(true));
+        settings.set_gtk_enable_animations(false);
+        for opening in [false, true] {
+            panel.slide(opening);
+            assert!(!panel.is_animating());
+            assert!(panel.imp().slide.borrow().is_none());
+            assert!(panel.imp().tick.borrow().is_none());
+            let settled = Rc::new(Cell::new(false));
+            let called = settled.clone();
+            panel.on_settled(move || called.set(true));
+            assert!(settled.get());
+            assert!(!obsolete.get());
+        }
     }
 }

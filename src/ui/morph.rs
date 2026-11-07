@@ -52,6 +52,49 @@ impl SpringParams {
     }
 }
 
+/// A reversible, fixed-size slide. Progress is shared by position and opacity so
+/// changing direction never jumps, even before the first frame is allocated.
+#[derive(Clone, Copy, Debug)]
+pub struct PanelSlide {
+    progress: f64,
+    opening: bool,
+}
+
+impl PanelSlide {
+    pub fn new(opening: bool) -> Self {
+        Self {
+            progress: if opening { 0.0 } else { 1.0 },
+            opening,
+        }
+    }
+
+    pub fn retarget(&mut self, opening: bool) {
+        self.opening = opening;
+    }
+
+    pub fn advance(&mut self, seconds: f64) {
+        let delta = if self.opening {
+            seconds / 0.160
+        } else {
+            -seconds / 0.120
+        };
+        self.progress = (self.progress + delta).clamp(0.0, 1.0);
+    }
+
+    pub fn opacity(&self) -> f64 {
+        let t = self.progress;
+        t * t * (3.0 - 2.0 * t)
+    }
+
+    pub fn shape(&self, bounds: MorphRect) -> MorphRect {
+        bounds.translated(0.0, -12.0 * (1.0 - self.opacity()) as f32)
+    }
+
+    pub fn is_settled(&self) -> bool {
+        self.progress == if self.opening { 1.0 } else { 0.0 }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Spring {
     params: SpringParams,
@@ -593,5 +636,46 @@ mod tests {
         set_motion_style(MotionStyle::Calm);
         assert_eq!(motion_style(), MotionStyle::Calm);
         set_motion_style(MotionStyle::Bold);
+    }
+}
+
+#[cfg(test)]
+mod panel_slide_tests {
+    use super::{MorphRect, PanelSlide};
+
+    #[test]
+    fn slides_at_full_size_and_finishes_on_schedule() {
+        let bounds = MorphRect::new(0.0, 0.0, 480.0, 800.0);
+        for opening in [true, false] {
+            let mut slide = PanelSlide::new(opening);
+            let duration = if opening { 0.160 } else { 0.120 };
+            for _ in 0..16 {
+                let shape = slide.shape(bounds);
+                assert_eq!((shape.width, shape.height), (480.0, 800.0));
+                assert_eq!(shape.x, 0.0);
+                assert!((-12.0..=0.0).contains(&shape.y));
+                assert!((0.0..=1.0).contains(&slide.opacity()));
+                slide.advance(duration / 16.0);
+            }
+            slide.advance(1e-9);
+            assert!(slide.is_settled());
+            assert_eq!(slide.opacity(), if opening { 1.0 } else { 0.0 });
+        }
+    }
+
+    #[test]
+    fn reversing_preserves_position_and_opacity() {
+        let bounds = MorphRect::new(0.0, 0.0, 480.0, 800.0);
+        let mut slide = PanelSlide::new(true);
+        slide.advance(0.064);
+        for opening in [false, true, false, true] {
+            let before = (slide.shape(bounds), slide.opacity());
+            slide.retarget(opening);
+            assert_eq!((slide.shape(bounds), slide.opacity()), before);
+            slide.advance(0.01);
+        }
+        slide.advance(1.0);
+        assert!(slide.is_settled());
+        assert_eq!(slide.shape(bounds), bounds);
     }
 }
