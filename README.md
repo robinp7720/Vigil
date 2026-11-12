@@ -3,6 +3,18 @@
 Vigil is a Wayland-native desktop cockpit: it watches the session, keeps
 urgent context visible, and hands deeper searches and actions to Luma.
 
+## Screenshots
+
+Preview scenes with sample data and the dotfiles theme; colors and geometry are configurable.
+
+**Quick Settings** — desktop controls, system status, and a focus timer.
+
+![Vigil bar and Quick Settings showing audio, connectivity, power, and a focus timer](docs/screenshots/quick-settings.png)
+
+**Power** — battery status, power profiles, and hardware statistics.
+
+![Vigil Power page showing battery charge, power profiles, and energy statistics](docs/screenshots/power.png)
+
 ## Prerequisite release build
 
 Build the supervised binary before installing the desktop wiring:
