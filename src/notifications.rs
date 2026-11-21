@@ -886,7 +886,13 @@ fn run_notification_server(
 
     while !cancelled.load(Ordering::Relaxed) {
         match commands.recv_timeout(Duration::from_millis(200)) {
-            Ok(command) => handle_command(&connection, &manager, &state_sender, command)?,
+            Ok(command) => {
+                // An action may already have expired when GTK delivers the click.
+                // Reject that command without dropping the queue of later dismissals.
+                if let Err(error) = handle_command(&connection, &manager, &state_sender, command) {
+                    warn!("notification command failed: {error:#}");
+                }
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }

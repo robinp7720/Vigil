@@ -23,7 +23,7 @@ use super::context_card::{
     warning_text,
 };
 use super::control_center::{
-    ControlCenterFocus, ControlCenterView, NotificationPresentation, notification_row,
+    ControlCenterFocus, ControlCenterView, NotificationPresentation, NotificationRow,
 };
 use super::morph::{self, MorphRect};
 use super::morph_bin::{MorphBin, MorphOrigin, MorphShadow};
@@ -385,7 +385,7 @@ type PopoverRegistry = Rc<RefCell<BTreeMap<String, ManagedOverlay>>>;
 
 struct ToastRow {
     morph: MorphBin,
-    notification: Notification,
+    card: NotificationRow,
 }
 
 type ToastRows = Rc<RefCell<BTreeMap<u32, ToastRow>>>;
@@ -577,6 +577,9 @@ impl SurfaceRegistry {
         for id in &changes.removed {
             remove_toast(stack, *id, origin, animate);
         }
+        let presentation = NotificationPresentation::Toast {
+            stack_width: width as u32,
+        };
         for notification in &notifications {
             if changes.inserted.contains(&notification.id) {
                 let morph = MorphBin::new();
@@ -589,28 +592,30 @@ impl SurfaceRegistry {
                     alpha: 0.30,
                 }));
 
-                morph.set_child(Some(&toast_widget(
+                let card = NotificationRow::new(
                     notification,
                     self.notification_control.as_ref(),
-                    width,
-                )));
+                    presentation,
+                );
+                morph.set_child(Some(&card.widget));
                 stack.content.append(&morph);
                 if animate {
                     morph.expand_from(MorphOrigin::Window(origin), false, || {});
                 }
-                stack.rows.borrow_mut().insert(
-                    notification.id,
-                    ToastRow {
-                        morph,
-                        notification: notification.clone(),
-                    },
-                );
+                stack
+                    .rows
+                    .borrow_mut()
+                    .insert(notification.id, ToastRow { morph, card });
             } else if changes.replaced.contains(&notification.id)
                 && let Some(row) = stack.rows.borrow_mut().get_mut(&notification.id)
             {
-                let widget = toast_widget(notification, self.notification_control.as_ref(), width);
-                row.morph.crossfade(|| row.morph.set_child(Some(&widget)));
-                row.notification = notification.clone();
+                row.morph.crossfade(|| {
+                    row.card.update(
+                        notification,
+                        self.notification_control.as_ref(),
+                        presentation,
+                    )
+                });
             }
         }
         // Order live rows like `notifications`; leaving rows stay where they are unless the
@@ -958,20 +963,6 @@ fn new_notification_stack(
         output: output.to_string(),
         fullscreen,
     }
-}
-
-fn toast_widget(
-    notification: &Notification,
-    control: Option<&NotificationControl>,
-    width: i32,
-) -> gtk::Box {
-    notification_row(
-        notification,
-        control,
-        NotificationPresentation::Toast {
-            stack_width: u32::try_from(width).unwrap_or(400),
-        },
-    )
 }
 
 /// Collapses a toast back into the island while its slot springs shut, then removes it.
